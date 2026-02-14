@@ -1,0 +1,706 @@
+import Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
+import { getDataDir, getDatabasePath, initDatabase } from "./db";
+
+export interface UsageStatsSummary {
+  sessions: number;
+  events: number;
+  toolCalls: number;
+  totalMinutes: number;
+}
+
+export interface UsageStatsIntentRow {
+  label: string;
+  sessions: number;
+  totalMinutes: number;
+  avgConfidence: number;
+}
+
+export interface UsageStatsToolRow {
+  toolName: string;
+  calls: number;
+  successCalls: number;
+  totalSeconds: number;
+}
+
+export interface UsageStatsAgentRow {
+  agent: string;
+  provider: string;
+  sessions: number;
+  totalMinutes: number;
+}
+
+export interface UsageStatsDayRow {
+  day: string;
+  sessions: number;
+  totalMinutes: number;
+}
+
+export interface UsageStatsResult {
+  rangeLabel: string;
+  sinceIso: string | null;
+  summary: UsageStatsSummary;
+  byIntent: UsageStatsIntentRow[];
+  byTool: UsageStatsToolRow[];
+  byAgent: UsageStatsAgentRow[];
+  byDay: UsageStatsDayRow[];
+}
+
+export interface SessionListItem {
+  id: string;
+  provider: string;
+  agent: string;
+  repoPath: string | null;
+  branch: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  status: string;
+  durationMinutes: number;
+  intentLabel: string | null;
+  intentConfidence: number | null;
+  hasCapsule: boolean;
+}
+
+export interface CapsuleData {
+  summaryMarkdown: string;
+  decisions: string[];
+  todos: string[];
+  files: string[];
+  commands: string[];
+  errors: string[];
+}
+
+export interface TaskBreakdownData {
+  label: string;
+  minutes: number;
+  confidence: number;
+  source: string;
+}
+
+export interface ResumeSessionContext {
+  session: SessionListItem;
+  capsule: CapsuleData | null;
+  prompts: string[];
+  taskBreakdown: TaskBreakdownData[];
+}
+
+export interface SaveResumePackInput {
+  title: string;
+  sourceSessionIds: string[];
+  tokenBudget: number;
+  contentMarkdown: string;
+  metadata?: unknown;
+}
+
+export interface ResumePackRecord {
+  id: string;
+  title: string;
+  sourceSessionIds: string[];
+  tokenBudget: number;
+  contentMarkdown: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+function openReadonly(explicitDataDir?: string): Database.Database {
+  const dataDir = getDataDir(explicitDataDir);
+  const dbPath = getDatabasePath(dataDir);
+  initDatabase(explicitDataDir);
+  return new Database(dbPath, { readonly: true });
+}
+
+function openWritable(explicitDataDir?: string): Database.Database {
+  const dataDir = getDataDir(explicitDataDir);
+  const dbPath = getDatabasePath(dataDir);
+  initDatabase(explicitDataDir);
+  return new Database(dbPath);
+}
+
+function parseJsonObject(raw: string | null): Record<string, unknown> | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // no-op
+  }
+  return null;
+}
+
+function parseJsonStringArray(raw: string | null): string[] {
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    return [];
+  }
+}
+
+function durationExprSql(): string {
+  return `
+    CASE
+      WHEN julianday(COALESCE(
+        s.ended_at,
+        (SELECT MAX(e.timestamp) FROM events e WHERE e.session_id = s.id),
+        s.started_at
+      )) > julianday(s.started_at)
+      THEN (julianday(COALESCE(
+        s.ended_at,
+        (SELECT MAX(e.timestamp) FROM events e WHERE e.session_id = s.id),
+        s.started_at
+      )) - julianday(s.started_at)) * 24.0 * 60.0
+      ELSE 0
+    END
+  `;
+}
+
+function getSinceWhereClause(sinceIso: string | null): {
+  whereSql: string;
+  params: unknown[];
+} {
+  if (!sinceIso) {
+    return { whereSql: "", params: [] };
+  }
+
+  return {
+    whereSql: "WHERE datetime(s.started_at) >= datetime(?)",
+    params: [sinceIso],
+  };
+}
+
+function getEventToolWhereClauseForSessions(sinceIso: string | null): {
+  whereSql: string;
+  params: unknown[];
+} {
+  if (!sinceIso) {
+    return { whereSql: "", params: [] };
+  }
+
+  return {
+    whereSql:
+      "WHERE session_id IN (SELECT id FROM sessions WHERE datetime(started_at) >= datetime(?))",
+    params: [sinceIso],
+  };
+}
+
+export function listSessions(
+  options?: { limit?: number; sinceIso?: string | null },
+  explicitDataDir?: string,
+): SessionListItem[] {
+  const db = openReadonly(explicitDataDir);
+  const limit = options?.limit ?? 50;
+  const sinceIso = options?.sinceIso ?? null;
+  const durationExpr = durationExprSql();
+  const { whereSql, params } = getSinceWhereClause(sinceIso);
+
+  try {
+    const rows = db
+      .prepare(
+        `
+          SELECT
+            s.id,
+            s.provider,
+            s.agent,
+            s.repo_path as repoPath,
+            s.branch,
+            s.started_at as startedAt,
+            s.ended_at as endedAt,
+            s.status,
+            ${durationExpr} as durationMinutes,
+            li.label as intentLabel,
+            li.confidence as intentConfidence,
+            CASE WHEN c.session_id IS NOT NULL THEN 1 ELSE 0 END as hasCapsule
+          FROM sessions s
+          LEFT JOIN intent_labels li
+            ON li.id = (
+              SELECT il2.id
+              FROM intent_labels il2
+              WHERE il2.session_id = s.id
+              ORDER BY datetime(il2.created_at) DESC
+              LIMIT 1
+            )
+          LEFT JOIN capsules c ON c.session_id = s.id
+          ${whereSql}
+          ORDER BY datetime(s.started_at) DESC
+          LIMIT ?
+        `,
+      )
+      .all(...params, limit) as Array<{
+      id: string;
+      provider: string;
+      agent: string;
+      repoPath: string | null;
+      branch: string | null;
+      startedAt: string;
+      endedAt: string | null;
+      status: string;
+      durationMinutes: number | null;
+      intentLabel: string | null;
+      intentConfidence: number | null;
+      hasCapsule: number;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      provider: row.provider,
+      agent: row.agent,
+      repoPath: row.repoPath,
+      branch: row.branch,
+      startedAt: row.startedAt,
+      endedAt: row.endedAt,
+      status: row.status,
+      durationMinutes: Number(row.durationMinutes ?? 0),
+      intentLabel: row.intentLabel,
+      intentConfidence:
+        row.intentConfidence === null ? null : Number(row.intentConfidence),
+      hasCapsule: row.hasCapsule === 1,
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+function groupBy<T>(
+  items: T[],
+  keyFn: (item: T) => string,
+): Map<string, T[]> {
+  const map = new Map<string, T[]>();
+  for (const item of items) {
+    const key = keyFn(item);
+    const bucket = map.get(key);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      map.set(key, [item]);
+    }
+  }
+  return map;
+}
+
+export function getUsageStats(
+  rangeLabel: string,
+  sinceIso: string | null,
+  explicitDataDir?: string,
+): UsageStatsResult {
+  const sessions = listSessions(
+    {
+      limit: 100_000,
+      sinceIso,
+    },
+    explicitDataDir,
+  );
+
+  const { whereSql: eventWhereSql, params: eventParams } =
+    getEventToolWhereClauseForSessions(sinceIso);
+  const db = openReadonly(explicitDataDir);
+  try {
+    const eventsRow = db
+      .prepare(`SELECT COUNT(*) as value FROM events ${eventWhereSql}`)
+      .get(...eventParams) as { value: number };
+    const toolCallsRow = db
+      .prepare(`SELECT COUNT(*) as value FROM tool_calls ${eventWhereSql}`)
+      .get(...eventParams) as { value: number };
+
+    const summary: UsageStatsSummary = {
+      sessions: sessions.length,
+      events: eventsRow.value,
+      toolCalls: toolCallsRow.value,
+      totalMinutes: Number(
+        sessions.reduce((acc, row) => acc + row.durationMinutes, 0).toFixed(2),
+      ),
+    };
+
+    const byIntentMap = groupBy(
+      sessions,
+      (row) => row.intentLabel ?? "unlabeled",
+    );
+    const byIntent: UsageStatsIntentRow[] = [...byIntentMap.entries()]
+      .map(([label, rows]) => {
+        const confidenceValues = rows
+          .map((row) => row.intentConfidence)
+          .filter((value): value is number => typeof value === "number");
+        const avgConfidence =
+          confidenceValues.length > 0
+            ? confidenceValues.reduce((acc, value) => acc + value, 0) /
+              confidenceValues.length
+            : 0;
+
+        return {
+          label,
+          sessions: rows.length,
+          totalMinutes: Number(
+            rows.reduce((acc, row) => acc + row.durationMinutes, 0).toFixed(2),
+          ),
+          avgConfidence: Number(avgConfidence.toFixed(3)),
+        };
+      })
+      .sort((a, b) => b.totalMinutes - a.totalMinutes);
+
+    const byAgentMap = groupBy(
+      sessions,
+      (row) => `${row.agent}||${row.provider}`,
+    );
+    const byAgent: UsageStatsAgentRow[] = [...byAgentMap.entries()]
+      .map(([composite, rows]) => {
+        const [agent, provider] = composite.split("||");
+        return {
+          agent,
+          provider,
+          sessions: rows.length,
+          totalMinutes: Number(
+            rows.reduce((acc, row) => acc + row.durationMinutes, 0).toFixed(2),
+          ),
+        };
+      })
+      .sort((a, b) => b.totalMinutes - a.totalMinutes);
+
+    const byDayMap = groupBy(
+      sessions,
+      (row) => row.startedAt.slice(0, 10),
+    );
+    const byDay: UsageStatsDayRow[] = [...byDayMap.entries()]
+      .map(([day, rows]) => ({
+        day,
+        sessions: rows.length,
+        totalMinutes: Number(
+          rows.reduce((acc, row) => acc + row.durationMinutes, 0).toFixed(2),
+        ),
+      }))
+      .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+
+    const toolRows = db
+      .prepare(
+        `
+          SELECT
+            tc.tool_name as toolName,
+            COUNT(*) as calls,
+            SUM(CASE WHEN tc.success = 1 THEN 1 ELSE 0 END) as successCalls,
+            SUM(COALESCE(tc.duration_ms, 0)) / 1000.0 as totalSeconds
+          FROM tool_calls tc
+          ${sinceIso ? "WHERE tc.session_id IN (SELECT id FROM sessions WHERE datetime(started_at) >= datetime(?))" : ""}
+          GROUP BY tc.tool_name
+          ORDER BY calls DESC, totalSeconds DESC
+        `,
+      )
+      .all(...(sinceIso ? [sinceIso] : [])) as Array<{
+      toolName: string;
+      calls: number;
+      successCalls: number;
+      totalSeconds: number | null;
+    }>;
+
+    const byTool: UsageStatsToolRow[] = toolRows.map((row) => ({
+      toolName: row.toolName,
+      calls: row.calls,
+      successCalls: row.successCalls,
+      totalSeconds: Number((row.totalSeconds ?? 0).toFixed(2)),
+    }));
+
+    return {
+      rangeLabel,
+      sinceIso,
+      summary,
+      byIntent,
+      byTool,
+      byAgent,
+      byDay,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function resolveSessionRef(db: Database.Database, sessionRef: string): string | null {
+  if (sessionRef !== "latest") {
+    return sessionRef;
+  }
+
+  const row = db
+    .prepare(
+      `
+        SELECT id
+        FROM sessions
+        ORDER BY datetime(started_at) DESC
+        LIMIT 1
+      `,
+    )
+    .get() as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+function loadSessionById(db: Database.Database, sessionId: string): SessionListItem | null {
+  const durationExpr = durationExprSql();
+  const row = db
+    .prepare(
+      `
+        SELECT
+          s.id,
+          s.provider,
+          s.agent,
+          s.repo_path as repoPath,
+          s.branch,
+          s.started_at as startedAt,
+          s.ended_at as endedAt,
+          s.status,
+          ${durationExpr} as durationMinutes,
+          li.label as intentLabel,
+          li.confidence as intentConfidence,
+          CASE WHEN c.session_id IS NOT NULL THEN 1 ELSE 0 END as hasCapsule
+        FROM sessions s
+        LEFT JOIN intent_labels li
+          ON li.id = (
+            SELECT il2.id
+            FROM intent_labels il2
+            WHERE il2.session_id = s.id
+            ORDER BY datetime(il2.created_at) DESC
+            LIMIT 1
+          )
+        LEFT JOIN capsules c ON c.session_id = s.id
+        WHERE s.id = ?
+      `,
+    )
+    .get(sessionId) as
+    | {
+        id: string;
+        provider: string;
+        agent: string;
+        repoPath: string | null;
+        branch: string | null;
+        startedAt: string;
+        endedAt: string | null;
+        status: string;
+        durationMinutes: number | null;
+        intentLabel: string | null;
+        intentConfidence: number | null;
+        hasCapsule: number;
+      }
+    | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    provider: row.provider,
+    agent: row.agent,
+    repoPath: row.repoPath,
+    branch: row.branch,
+    startedAt: row.startedAt,
+    endedAt: row.endedAt,
+    status: row.status,
+    durationMinutes: Number(row.durationMinutes ?? 0),
+    intentLabel: row.intentLabel,
+    intentConfidence:
+      row.intentConfidence === null ? null : Number(row.intentConfidence),
+    hasCapsule: row.hasCapsule === 1,
+  };
+}
+
+export function loadResumeSessionContexts(
+  sessionRefs: string[],
+  explicitDataDir?: string,
+): ResumeSessionContext[] {
+  const db = openReadonly(explicitDataDir);
+  try {
+    const resolvedIds: string[] = [];
+    for (const ref of sessionRefs) {
+      const resolved = resolveSessionRef(db, ref);
+      if (resolved && !resolvedIds.includes(resolved)) {
+        resolvedIds.push(resolved);
+      }
+    }
+
+    const contexts: ResumeSessionContext[] = [];
+    for (const sessionId of resolvedIds) {
+      const session = loadSessionById(db, sessionId);
+      if (!session) {
+        continue;
+      }
+
+      const capsuleRow = db
+        .prepare(
+          `
+            SELECT
+              summary_markdown as summaryMarkdown,
+              decisions_json as decisionsJson,
+              todos_json as todosJson,
+              files_json as filesJson,
+              commands_json as commandsJson,
+              errors_json as errorsJson
+            FROM capsules
+            WHERE session_id = ?
+          `,
+        )
+        .get(sessionId) as
+        | {
+            summaryMarkdown: string;
+            decisionsJson: string | null;
+            todosJson: string | null;
+            filesJson: string | null;
+            commandsJson: string | null;
+            errorsJson: string | null;
+          }
+        | undefined;
+
+      const promptRows = db
+        .prepare(
+          `
+            SELECT payload_json as payloadJson
+            FROM events
+            WHERE session_id = ?
+              AND event_type = 'request_sent'
+            ORDER BY datetime(timestamp) ASC
+            LIMIT 20
+          `,
+        )
+        .all(sessionId) as Array<{ payloadJson: string | null }>;
+
+      const prompts: string[] = [];
+      for (const row of promptRows) {
+        const payload = parseJsonObject(row.payloadJson);
+        const prompt = payload?.prompt;
+        if (typeof prompt === "string" && prompt.trim().length > 0) {
+          prompts.push(prompt.trim());
+        }
+      }
+
+      const taskRows = db
+        .prepare(
+          `
+            SELECT
+              task_label as label,
+              duration_minutes as minutes,
+              confidence,
+              source
+            FROM task_breakdowns
+            WHERE session_id = ?
+            ORDER BY duration_minutes DESC, confidence DESC
+          `,
+        )
+        .all(sessionId) as Array<{
+        label: string;
+        minutes: number;
+        confidence: number;
+        source: string;
+      }>;
+
+      contexts.push({
+        session,
+        capsule: capsuleRow
+          ? {
+              summaryMarkdown: capsuleRow.summaryMarkdown,
+              decisions: parseJsonStringArray(capsuleRow.decisionsJson),
+              todos: parseJsonStringArray(capsuleRow.todosJson),
+              files: parseJsonStringArray(capsuleRow.filesJson),
+              commands: parseJsonStringArray(capsuleRow.commandsJson),
+              errors: parseJsonStringArray(capsuleRow.errorsJson),
+            }
+          : null,
+        prompts,
+        taskBreakdown: taskRows.map((row) => ({
+          label: row.label,
+          minutes: Number(row.minutes),
+          confidence: Number(row.confidence),
+          source: row.source,
+        })),
+      });
+    }
+
+    return contexts.sort((a, b) =>
+      a.session.startedAt < b.session.startedAt ? -1 : 1,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+export function saveResumePack(
+  input: SaveResumePackInput,
+  explicitDataDir?: string,
+): { id: string } {
+  const db = openWritable(explicitDataDir);
+  const id = randomUUID();
+  try {
+    db.prepare(
+      `
+        INSERT INTO resume_packs (
+          id,
+          title,
+          source_session_ids_json,
+          token_budget,
+          content_markdown,
+          metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `,
+    ).run(
+      id,
+      input.title,
+      JSON.stringify(input.sourceSessionIds),
+      input.tokenBudget,
+      input.contentMarkdown,
+      input.metadata === undefined ? null : JSON.stringify(input.metadata),
+    );
+  } finally {
+    db.close();
+  }
+  return { id };
+}
+
+export function listResumePacks(
+  limit = 20,
+  explicitDataDir?: string,
+): ResumePackRecord[] {
+  const db = openReadonly(explicitDataDir);
+  try {
+    const rows = db
+      .prepare(
+        `
+          SELECT
+            id,
+            title,
+            source_session_ids_json as sourceSessionIdsJson,
+            token_budget as tokenBudget,
+            content_markdown as contentMarkdown,
+            metadata_json as metadataJson,
+            created_at as createdAt
+          FROM resume_packs
+          ORDER BY datetime(created_at) DESC
+          LIMIT ?
+        `,
+      )
+      .all(limit) as Array<{
+      id: string;
+      title: string;
+      sourceSessionIdsJson: string;
+      tokenBudget: number;
+      contentMarkdown: string;
+      metadataJson: string | null;
+      createdAt: string;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      sourceSessionIds: parseJsonStringArray(row.sourceSessionIdsJson),
+      tokenBudget: row.tokenBudget,
+      contentMarkdown: row.contentMarkdown,
+      metadata: parseJsonObject(row.metadataJson),
+      createdAt: row.createdAt,
+    }));
+  } finally {
+    db.close();
+  }
+}

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { loadAppConfig } from "../config";
+import { redactText } from "../privacy/redaction";
 import {
   getDataDir,
   getDatabasePath,
@@ -211,12 +212,12 @@ function sanitizePayload(payload: ClaudeHookPayload): Record<string, unknown> {
 
 function sanitizePayloadWithPrivacy(
   payload: ClaudeHookPayload,
-  options: { capturePrompts: boolean },
+  options: { capturePrompts: boolean; redactPrompt: (input: string) => string },
 ): Record<string, unknown> {
   const metadata = sanitizePayload(payload);
 
   if (options.capturePrompts && typeof payload.prompt === "string") {
-    metadata.prompt = payload.prompt;
+    metadata.prompt = options.redactPrompt(payload.prompt);
   }
 
   return metadata;
@@ -311,7 +312,7 @@ export function ingestClaudeHookPayload(
     : undefined;
 
   const appConfig = loadAppConfig(explicitDataDir);
-  const capturePrompts = appConfig.privacy?.capturePrompts ?? false;
+  const capturePrompts = appConfig.privacy.capturePrompts;
 
   recordEvent(
     {
@@ -321,7 +322,10 @@ export function ingestClaudeHookPayload(
       eventType,
       timestamp,
       repoPath,
-      payload: sanitizePayloadWithPrivacy(payload, { capturePrompts }),
+      payload: sanitizePayloadWithPrivacy(payload, {
+        capturePrompts,
+        redactPrompt: (input) => redactText(input, appConfig.privacy),
+      }),
       sessionStatus: hookEventName === "SessionEnd" ? "completed" : undefined,
       toolCall,
     },

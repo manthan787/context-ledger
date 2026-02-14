@@ -46,6 +46,10 @@ export interface GeneratedSummary {
   }>;
 }
 
+export interface GenerateSummaryOptions {
+  includePromptSamples?: boolean;
+}
+
 function normalizeBaseUrl(provider: SummarizerConfig["provider"], baseUrl?: string): string {
   if (baseUrl && baseUrl.trim().length > 0) {
     return baseUrl.replace(/\/+$/, "");
@@ -111,19 +115,25 @@ function getSessionDurationMinutes(source: SessionSummarySource): number {
   return 0;
 }
 
-function buildPrompt(source: SessionSummarySource): string {
+function buildPrompt(
+  source: SessionSummarySource,
+  options?: GenerateSummaryOptions,
+): string {
+  const includePromptSamples = options?.includePromptSamples ?? true;
   const toolCounts = new Map<string, number>();
   for (const toolCall of source.toolCalls) {
     toolCounts.set(toolCall.toolName, (toolCounts.get(toolCall.toolName) ?? 0) + 1);
   }
 
   const promptSamples: string[] = [];
-  for (const event of source.events) {
-    const prompt = event.payload?.prompt;
-    if (typeof prompt === "string" && prompt.trim().length > 0) {
-      promptSamples.push(prompt.trim().slice(0, MAX_PROMPT_CHARS));
-      if (promptSamples.length >= MAX_PROMPT_SAMPLES) {
-        break;
+  if (includePromptSamples) {
+    for (const event of source.events) {
+      const prompt = event.payload?.prompt;
+      if (typeof prompt === "string" && prompt.trim().length > 0) {
+        promptSamples.push(prompt.trim().slice(0, MAX_PROMPT_CHARS));
+        if (promptSamples.length >= MAX_PROMPT_SAMPLES) {
+          break;
+        }
       }
     }
   }
@@ -387,8 +397,9 @@ function buildFallbackSummary(source: SessionSummarySource): GeneratedSummary {
 export async function generateSessionSummary(
   source: SessionSummarySource,
   config: SummarizerConfig,
+  options?: GenerateSummaryOptions,
 ): Promise<GeneratedSummary> {
-  const prompt = buildPrompt(source);
+  const prompt = buildPrompt(source, options);
 
   let rawText = "";
   if (config.provider === "openai") {
