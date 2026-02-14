@@ -138,6 +138,31 @@ ctx-ledger summarize --session latest
 - Task/time breakdown estimates (`task_breakdowns`)
 - Outcomes and extracted artifacts (files, commands, todo items, errors)
 
+## End-to-End Capture Test (Real Claude Calls)
+
+You can run a full e2e test that:
+
+- Creates a temporary workspace
+- Enables Claude hooks with project scope
+- Sends real `claude -p` prompts
+- Verifies those exact prompts were captured in ContextLedger SQLite events
+
+Prerequisites:
+
+- `claude` CLI installed and authenticated (`claude auth status`)
+
+Run:
+
+```bash
+npm run test:e2e:claude-capture
+```
+
+Keep artifacts for inspection:
+
+```bash
+npm run test:e2e:claude-capture -- --keep-artifacts
+```
+
 ## Commands
 
 - `ctx-ledger enable claude` installs Claude hook wiring and enables background capture.
