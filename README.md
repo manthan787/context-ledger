@@ -2,181 +2,225 @@
 
 Capture session context. Resume with intent.
 
-ContextLedger is a local-first CLI for tracking AI-assisted work sessions and building reusable memory handoffs for future sessions.
+ContextLedger is a local-first CLI for tracking AI-assisted work across coding agents and carrying useful context into the next session.
 
 ## Stack
 
 - TypeScript + Node.js
-- Commander CLI
 - SQLite (`better-sqlite3`)
+- Commander CLI
 
 ## Quickstart
 
 ```bash
 npm install
 npm run build
-npm run start -- enable claude
-npm run start -- configure summarizer --provider ollama --model llama3.1 --capture-prompts on
-npm run start -- doctor
-npm run start -- summarize --session latest
-```
 
-Or during development:
-
-```bash
-npm run dev -- doctor
-```
-
-## Enable Claude
-
-Use one command to enable Claude Code capture:
-
-```bash
+# Enable agent capture
 ctx-ledger enable claude
+ctx-ledger enable codex
+# Optional if you use Gemini CLI/history:
+ctx-ledger enable gemini
+
+# Configure privacy/summarizer
+ctx-ledger configure privacy --capture-prompts on --redact-secrets on --redact-emails on
+ctx-ledger configure summarizer --provider ollama --model llama3.1
+
+# Analyze and generate memory handoff
+ctx-ledger stats --range 7d
+ctx-ledger summarize --session latest
+ctx-ledger resume --from latest --budget 2000
 ```
 
-You can also run through npm during local development:
+## Integrations
+
+### Claude
+
+`ctx-ledger enable claude` installs async command hooks into Claude settings.
+
+- User scope (default): `~/.claude/settings.json`
+- Project scope: `.claude/settings.local.json`
+
+Captured events:
+
+- `SessionStart`
+- `UserPromptSubmit`
+- `PreToolUse`
+- `PostToolUse`
+- `Stop`
+- `SessionEnd`
+
+### Codex
+
+`ctx-ledger enable codex` enables incremental ingestion from Codex history JSONL.
+
+- Default source: `~/.codex/history.jsonl`
+- Custom source: `ctx-ledger enable codex --history-path /path/to/history.jsonl`
+
+### Gemini
+
+`ctx-ledger enable gemini` enables incremental ingestion from Gemini history JSONL.
+
+- Default source: `~/.gemini/history.jsonl`
+- Custom source: `ctx-ledger enable gemini --history-path /path/to/history.jsonl`
+
+### Sync
 
 ```bash
-npm run start -- enable claude
+ctx-ledger sync all
+ctx-ledger sync codex
+ctx-ledger sync gemini
 ```
 
-### Scope
+`stats`, `summarize`, `resume`, and `dashboard` automatically run sync for enabled Codex/Gemini integrations.
 
-- `ctx-ledger enable claude --scope user` writes to `~/.claude/settings.json` (default).
-- `ctx-ledger enable claude --scope project` writes to `.claude/settings.local.json` in the current repository.
+## Privacy & Redaction
 
-### How it works
-
-- ContextLedger registers Claude command hooks for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionEnd`.
-- Hooks run asynchronously and call an internal ingestion command.
-- Hook handlers are configured to avoid blocking or interrupting normal Claude sessions.
-
-### What gets captured (v0)
-
-- Session boundaries and timestamps.
-- Event stream metadata.
-- Tool usage metadata (tool name, success flag, timing when available).
-- Prompt metadata by default (`promptLength` only).
-- Optional full prompt capture when explicitly enabled.
-
-### Verify capture
-
-Run:
+Configure privacy settings:
 
 ```bash
-ctx-ledger doctor
+ctx-ledger configure privacy \
+  --capture-prompts on \
+  --redact-secrets on \
+  --redact-emails on \
+  --allow-remote-prompt-transfer off
 ```
 
-The output shows local database status and current counts for sessions, events, and tool calls.
+Defaults:
 
-## Configure Summarizer
+- `capturePrompts`: `off`
+- `redactSecrets`: `on`
+- `redactEmails`: `off`
+- `allowRemotePromptTransfer`: `off`
 
-Configure once, then summarize sessions on demand.
-
-### Ollama (local model)
+Custom regex redaction patterns:
 
 ```bash
-ctx-ledger configure summarizer \
-  --provider ollama \
-  --model llama3.1 \
-  --capture-prompts on
+ctx-ledger configure privacy --add-redaction-pattern "my-secret-pattern"
+```
+
+## Summarizer Configuration
+
+### Ollama (local)
+
+```bash
+ctx-ledger configure summarizer --provider ollama --model llama3.1
 ```
 
 ### OpenAI
 
 ```bash
-ctx-ledger configure summarizer \
-  --provider openai \
-  --model gpt-4.1-mini \
-  --capture-prompts on
-```
-
-Set API key via env var:
-
-```bash
+ctx-ledger configure summarizer --provider openai --model gpt-4.1-mini
 export OPENAI_API_KEY=...
-```
-
-Or pass it directly:
-
-```bash
-ctx-ledger configure summarizer --provider openai --model gpt-4.1-mini --api-key ...
 ```
 
 ### Anthropic
 
 ```bash
-ctx-ledger configure summarizer \
-  --provider anthropic \
-  --model claude-3-7-sonnet-latest \
-  --capture-prompts on
-```
-
-Set API key via env var:
-
-```bash
+ctx-ledger configure summarizer --provider anthropic --model claude-3-7-sonnet-latest
 export ANTHROPIC_API_KEY=...
 ```
 
-### View config
+If remote prompt transfer is disabled, captured prompt samples are excluded from remote summarizer requests.
+
+## Stats
 
 ```bash
-ctx-ledger configure show
+ctx-ledger stats --range 7d
+ctx-ledger stats --range 30d --group-by tool
+ctx-ledger stats --range all --format json
 ```
 
-## Generate Summary
+Supported groups:
+
+- `intent`
+- `tool`
+- `agent`
+- `day`
+- `all`
+
+## Summaries
 
 ```bash
 ctx-ledger summarize --session latest
 ```
 
-`summarize` stores:
+This stores:
 
-- Capsule summary (`capsules` table)
-- Primary intent classification (`intent_labels`)
-- Task/time breakdown estimates (`task_breakdowns`)
-- Outcomes and extracted artifacts (files, commands, todo items, errors)
+- `capsules` (session summary, outcomes, files/commands/errors/todos)
+- `intent_labels` (primary intent + confidence)
+- `task_breakdowns` (estimated time split)
 
-## End-to-End Capture Test (Real Claude Calls)
+## Resume Packs
 
-You can run a full e2e test that:
+```bash
+ctx-ledger resume --from latest --budget 2000
+ctx-ledger resume --from session-a --from session-b --format json
+ctx-ledger resume --from latest --out ./resume.md
+```
 
-- Creates a temporary workspace
-- Enables Claude hooks with project scope
-- Sends real `claude -p` prompts
-- Verifies those exact prompts were captured in ContextLedger SQLite events
+Stored in `resume_packs`.  
+List saved packs:
 
-Prerequisites:
+```bash
+ctx-ledger resume-packs
+```
 
-- `claude` CLI installed and authenticated (`claude auth status`)
+## Dashboard
 
-Run:
+```bash
+ctx-ledger dashboard --port 4173
+```
+
+Open:
+
+- `http://127.0.0.1:4173/`
+- API: `/api/stats`, `/api/sessions`, `/api/resume-packs`, `/healthz`
+
+## End-to-End Tests
+
+Real Claude capture test (requires authenticated Claude CLI):
 
 ```bash
 npm run test:e2e:claude-capture
 ```
 
-Keep artifacts for inspection:
+Full workflow test (stats + summarize + resume + dashboard + codex/gemini sync with fixtures):
 
 ```bash
-npm run test:e2e:claude-capture -- --keep-artifacts
+npm run test:e2e:full
+```
+
+Keep temporary artifacts for inspection:
+
+```bash
+npm run test:e2e:full -- --keep-artifacts
 ```
 
 ## Commands
 
-- `ctx-ledger enable claude` installs Claude hook wiring and enables background capture.
-- `ctx-ledger configure summarizer` sets provider/model/API + prompt capture preferences.
-- `ctx-ledger configure show` prints active config (API keys redacted).
-- `ctx-ledger init` initializes local SQLite storage.
-- `ctx-ledger doctor` validates setup and shows table counts.
-- `ctx-ledger summarize` generates and stores a session capsule and work classification.
-- `ctx-ledger capture|resume|stats` are scaffolded for upcoming implementation.
+- `ctx-ledger enable <claude|codex|gemini>`
+- `ctx-ledger sync <codex|gemini|all>`
+- `ctx-ledger configure summarizer`
+- `ctx-ledger configure privacy`
+- `ctx-ledger configure show`
+- `ctx-ledger summarize`
+- `ctx-ledger resume`
+- `ctx-ledger resume-packs`
+- `ctx-ledger stats`
+- `ctx-ledger dashboard`
+- `ctx-ledger doctor`
 
-## Local data path
+## Data Path
 
-By default, ContextLedger stores data at:
+Default data directory:
+
+`~/.context-ledger`
+
+Default database:
 
 `~/.context-ledger/context-ledger.db`
 
-Use `--data-dir <path>` to override.
+Override with:
+
+`--data-dir <path>`
