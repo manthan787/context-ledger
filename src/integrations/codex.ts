@@ -32,6 +32,7 @@ export interface SyncCodexResult {
   inserted: number;
   skipped: number;
   cursor: number;
+  touchedSessionIds: string[];
   reason?: string;
 }
 
@@ -113,6 +114,7 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
       inserted: 0,
       skipped: 0,
       cursor: integration?.cursor ?? 0,
+      touchedSessionIds: [],
       reason: "History file does not exist",
     };
   }
@@ -129,6 +131,7 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
 
   let inserted = 0;
   let skipped = 0;
+  const touchedSessionIds = new Set<string>();
 
   for (const line of lines) {
     const entry = parseHistoryLine(line);
@@ -149,9 +152,10 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
       payload.prompt = prompt;
     }
 
+    const sessionId = `codex-${entry.session_id}`;
     recordEvent(
       {
-        sessionId: `codex-${entry.session_id}`,
+        sessionId,
         provider: "openai",
         agent: "codex",
         eventType: "request_sent",
@@ -160,6 +164,7 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
       },
       options.dataDir,
     );
+    touchedSessionIds.add(sessionId);
     inserted += 1;
   }
 
@@ -185,5 +190,6 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
     inserted,
     skipped,
     cursor: nextCursor,
+    touchedSessionIds: [...touchedSessionIds],
   };
 }

@@ -32,6 +32,7 @@ export interface SyncGeminiResult {
   inserted: number;
   skipped: number;
   cursor: number;
+  touchedSessionIds: string[];
   reason?: string;
 }
 
@@ -148,6 +149,7 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
       inserted: 0,
       skipped: 0,
       cursor: integration?.cursor ?? 0,
+      touchedSessionIds: [],
       reason: "History file does not exist",
     };
   }
@@ -164,6 +166,7 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
 
   let inserted = 0;
   let skipped = 0;
+  const touchedSessionIds = new Set<string>();
 
   for (const line of lines) {
     const entry = parseGeminiHistoryLine(line);
@@ -183,9 +186,10 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
       payload.prompt = prompt;
     }
 
+    const sessionId = `gemini-${entry.sessionId}`;
     recordEvent(
       {
-        sessionId: `gemini-${entry.sessionId}`,
+        sessionId,
         provider: "google",
         agent: "gemini",
         eventType: "request_sent",
@@ -194,6 +198,7 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
       },
       options.dataDir,
     );
+    touchedSessionIds.add(sessionId);
     inserted += 1;
   }
 
@@ -219,5 +224,6 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
     inserted,
     skipped,
     cursor: nextCursor,
+    touchedSessionIds: [...touchedSessionIds],
   };
 }

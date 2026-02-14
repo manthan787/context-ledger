@@ -95,6 +95,11 @@ export interface TaskBreakdownInput {
   source: string;
 }
 
+export interface SessionSummaryFreshness {
+  latestEventTimestamp: string | null;
+  capsuleUpdatedAt: string | null;
+}
+
 export function getDataDir(explicitDataDir?: string): string {
   return explicitDataDir ?? DEFAULT_DATA_DIR;
 }
@@ -655,6 +660,42 @@ export function replaceTaskBreakdownForSession(
 
   try {
     tx();
+  } finally {
+    db.close();
+  }
+}
+
+export function getSessionSummaryFreshness(
+  sessionId: string,
+  explicitDataDir?: string,
+): SessionSummaryFreshness {
+  const db = openWritableDatabase(explicitDataDir);
+  try {
+    const latestEvent = db
+      .prepare(
+        `
+          SELECT MAX(timestamp) as value
+          FROM events
+          WHERE session_id = ?
+        `,
+      )
+      .get(sessionId) as { value: string | null };
+
+    const capsule = db
+      .prepare(
+        `
+          SELECT updated_at as updatedAt
+          FROM capsules
+          WHERE session_id = ?
+          LIMIT 1
+        `,
+      )
+      .get(sessionId) as { updatedAt: string | null } | undefined;
+
+    return {
+      latestEventTimestamp: latestEvent.value ?? null,
+      capsuleUpdatedAt: capsule?.updatedAt ?? null,
+    };
   } finally {
     db.close();
   }

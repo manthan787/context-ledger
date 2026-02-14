@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
+import { spawn } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -28,12 +29,8 @@ import {
   getDataDir,
   initDatabase,
   inspectDatabase,
-  loadSessionSummarySource,
-  replaceIntentLabelsForSession,
-  replaceTaskBreakdownForSession,
-  saveSessionCapsule,
 } from "./storage/db";
-import { generateSessionSummary } from "./summarization/summarizer";
+import { summarizeSessionByRef } from "./summarization/session-summary";
 
 const program = new Command();
 
@@ -151,8 +148,49 @@ type SyncOutcome = {
   status: "ok" | "skipped";
   inserted: number;
   skipped: number;
+  touchedSessionIds: string[];
   reason?: string;
 };
+
+const AUTO_SUMMARY_MAX_PER_SYNC = 4;
+
+function enqueueAutoSummaries(
+  sessionIds: string[],
+  explicitDataDir: string | undefined,
+  source: string,
+): void {
+  const config = loadAppConfig(explicitDataDir);
+  if (!config.summarizer) {
+    return;
+  }
+
+  const unique = [...new Set(sessionIds.filter((value) => value.trim().length > 0))];
+  if (unique.length === 0) {
+    return;
+  }
+
+  const selected = unique.slice(-AUTO_SUMMARY_MAX_PER_SYNC);
+  const cliPath = resolveHookCliEntrypointPath();
+  for (const sessionId of selected) {
+    const args = [
+      cliPath,
+      "internal-auto-summarize",
+      "--session",
+      sessionId,
+      "--source",
+      source,
+    ];
+    if (explicitDataDir) {
+      args.push("--data-dir", explicitDataDir);
+    }
+
+    const child = spawn(process.execPath, args, {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  }
+}
 
 function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
   const config = loadAppConfig(explicitDataDir);
@@ -168,6 +206,7 @@ function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
       status: result.status,
       inserted: result.inserted,
       skipped: result.skipped,
+      touchedSessionIds: result.touchedSessionIds,
       reason: result.reason,
     });
   }
@@ -182,6 +221,7 @@ function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
       status: result.status,
       inserted: result.inserted,
       skipped: result.skipped,
+      touchedSessionIds: result.touchedSessionIds,
       reason: result.reason,
     });
   }
@@ -204,6 +244,15 @@ function printSyncOutcomes(outcomes: SyncOutcome[]): void {
       );
     }
   }
+}
+
+function enqueueAutoSummariesFromSync(
+  outcomes: SyncOutcome[],
+  explicitDataDir: string | undefined,
+  source: string,
+): void {
+  const touched = outcomes.flatMap((outcome) => outcome.touchedSessionIds);
+  enqueueAutoSummaries(touched, explicitDataDir, source);
 }
 
 function ensureProvider(input: string): SummarizerProvider | null {
@@ -487,6 +536,7 @@ program
         if (sync.reason) {
           console.log(`Reason: ${sync.reason}`);
         }
+        enqueueAutoSummaries(sync.touchedSessionIds, options.dataDir, "auto_codex_sync");
         return;
       }
 
@@ -507,6 +557,7 @@ program
         if (sync.reason) {
           console.log(`Reason: ${sync.reason}`);
         }
+        enqueueAutoSummaries(sync.touchedSessionIds, options.dataDir, "auto_gemini_sync");
         return;
       }
 
@@ -544,6 +595,7 @@ program
           status: result.status,
           inserted: result.inserted,
           skipped: result.skipped,
+          touchedSessionIds: result.touchedSessionIds,
           reason: result.reason,
         });
       }
@@ -558,6 +610,7 @@ program
           status: result.status,
           inserted: result.inserted,
           skipped: result.skipped,
+          touchedSessionIds: result.touchedSessionIds,
           reason: result.reason,
         });
       }
@@ -569,6 +622,7 @@ program
       }
 
       printSyncOutcomes(outcomes);
+      enqueueAutoSummariesFromSync(outcomes, options.dataDir, "auto_sync");
     },
   );
 
@@ -661,102 +715,46 @@ program
     initDatabase(options.dataDir);
     const syncOutcomes = syncEnabledIntegrations(options.dataDir);
     printSyncOutcomes(syncOutcomes);
+    enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_summarize");
 
-    const appConfig = loadAppConfig(options.dataDir);
-    const summarizer = appConfig.summarizer;
+    const result = await summarizeSessionByRef({
+      sessionRef: options.session,
+      dataDir: options.dataDir,
+      source: "manual_summarize",
+      skipIfFresh: false,
+    });
 
-    if (!summarizer) {
-      console.error("Summarizer is not configured.");
-      console.error(
-        "Run: ctx-ledger configure summarizer --provider ollama --model llama3.1 --capture-prompts on",
-      );
-      process.exitCode = 1;
-      return;
-    }
-
-    const source = loadSessionSummarySource(options.session, options.dataDir);
-    if (!source) {
-      console.error(`No session found for: ${options.session}`);
-      process.exitCode = 1;
-      return;
-    }
-
-    const promptCount = source.events.filter(
-      (event) => typeof event.payload?.prompt === "string",
-    ).length;
-    if (promptCount === 0 && !appConfig.privacy.capturePrompts) {
-      console.log(
-        "Prompt capture is currently off; summary quality may be limited to metadata and tools.",
-      );
-    }
-
-    const usesRemoteProvider =
-      summarizer.provider === "openai" || summarizer.provider === "anthropic";
-    const includePromptSamples =
-      !usesRemoteProvider || appConfig.privacy.allowRemotePromptTransfer;
-    if (usesRemoteProvider && !includePromptSamples && promptCount > 0) {
-      console.log(
-        "Remote prompt transfer is disabled. Prompt samples are excluded from summarizer input.",
-      );
-    }
-
-    try {
-      const summary = await generateSessionSummary(source, summarizer, {
-        includePromptSamples,
-      });
-
-      saveSessionCapsule(
-        {
-          sessionId: source.session.id,
-          summaryMarkdown: summary.summaryMarkdown,
-          decisions: summary.keyOutcomes,
-          todos: summary.todoItems,
-          files: summary.filesTouched,
-          commands: summary.commands,
-          errors: summary.errors,
-        },
-        options.dataDir,
-      );
-
-      replaceIntentLabelsForSession(
-        source.session.id,
-        "summarizer",
-        [
-          {
-            label: summary.primaryIntent,
-            confidence: summary.intentConfidence,
-            source: "summarizer",
-            reason: {
-              model: summarizer.model,
-              provider: summarizer.provider,
-            },
-          },
-        ],
-        options.dataDir,
-      );
-
-      replaceTaskBreakdownForSession(
-        source.session.id,
-        "summarizer",
-        summary.tasks.map((task) => ({
-          taskLabel: task.name,
-          durationMinutes: task.minutes,
-          confidence: task.confidence,
-          source: "summarizer",
-        })),
-        options.dataDir,
-      );
-
+    if (result.status === "stored") {
       console.log("Session summary stored.");
-      console.log(`Session: ${source.session.id}`);
-      console.log(`Primary intent: ${summary.primaryIntent}`);
-      console.log(`Task buckets: ${summary.tasks.length}`);
-      console.log(`Capsule outcomes: ${summary.keyOutcomes.length}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to summarize session: ${message}`);
-      process.exitCode = 1;
+      console.log(`Session: ${result.sessionId}`);
+      console.log(`Primary intent: ${result.primaryIntent ?? "unknown"}`);
+      console.log(`Task buckets: ${result.taskBuckets ?? 0}`);
+      console.log(`Capsule outcomes: ${result.outcomes ?? 0}`);
+      return;
     }
+
+    if (result.status === "skipped") {
+      if (result.reason === "summarizer_not_configured") {
+        console.error("Summarizer is not configured.");
+        console.error(
+          "Run: ctx-ledger configure summarizer --provider ollama --model llama3.1 --capture-prompts on",
+        );
+      } else if (result.reason === "session_not_found") {
+        console.error(`No session found for: ${options.session}`);
+      } else if (result.reason === "already_up_to_date") {
+        console.log(`Session ${result.sessionId} is already up to date.`);
+      } else {
+        console.log(`Summarize skipped: ${result.reason ?? "unknown_reason"}`);
+      }
+
+      if (result.reason === "session_not_found" || result.reason === "summarizer_not_configured") {
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    console.error(`Failed to summarize session: ${result.error ?? "unknown error"}`);
+    process.exitCode = 1;
   });
 
 program
@@ -795,6 +793,7 @@ program
       if (!suppressSyncOutput) {
         printSyncOutcomes(syncOutcomes);
       }
+      enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_resume");
 
       const sessionRefs = options.from.length > 0 ? options.from : ["latest"];
       const contexts = loadResumeSessionContexts(sessionRefs, options.dataDir);
@@ -898,6 +897,7 @@ program
       if (format !== "json") {
         printSyncOutcomes(syncOutcomes);
       }
+      enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_stats");
 
       const { label, sinceIso } = parseRange(options.range);
       const stats = getUsageStats(label, sinceIso, options.dataDir);
@@ -982,6 +982,7 @@ program
     initDatabase(options.dataDir);
     const syncOutcomes = syncEnabledIntegrations(options.dataDir);
     printSyncOutcomes(syncOutcomes);
+    enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_dashboard");
 
     const port = Number(options.port);
     if (!Number.isFinite(port) || port <= 0 || port > 65535) {
@@ -1046,11 +1047,39 @@ program
 
     try {
       const payload = await readStdin();
-      ingestClaudeHookPayload(payload, options.dataDir);
+      const result = ingestClaudeHookPayload(payload, options.dataDir);
+      if (result?.hookEventName === "SessionEnd") {
+        enqueueAutoSummaries(
+          [result.sessionId],
+          options.dataDir,
+          "auto_claude_session_end",
+        );
+      }
     } catch {
       // Hook ingestion must never interrupt a coding session.
     }
   });
+
+program
+  .command("internal-auto-summarize", { hidden: true })
+  .description("Internal auto summarization command")
+  .requiredOption("--session <id>", "Session id to summarize")
+  .option("--source <source>", "Label source", "auto")
+  .option("--data-dir <path>", "Custom data directory")
+  .action(
+    async (options: { session: string; source: string; dataDir?: string }) => {
+      try {
+        await summarizeSessionByRef({
+          sessionRef: options.session,
+          dataDir: options.dataDir,
+          source: options.source,
+          skipIfFresh: true,
+        });
+      } catch {
+        // Internal auto summarization should never interrupt users.
+      }
+    },
+  );
 
 program.parseAsync(process.argv).catch((error: unknown) => {
   console.error("Command failed:", error);

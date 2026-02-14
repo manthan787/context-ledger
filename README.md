@@ -27,8 +27,8 @@ ctx-ledger configure privacy --capture-prompts on --redact-secrets on --redact-e
 ctx-ledger configure summarizer --provider ollama --model llama3.1
 
 # Analyze and generate memory handoff
+# (summaries/intents are auto-generated after session updates once summarizer is configured)
 ctx-ledger stats --range 7d
-ctx-ledger summarize --session latest
 ctx-ledger resume --from latest --budget 2000
 ```
 
@@ -150,6 +150,12 @@ This stores:
 - `capsules` (session summary, outcomes, files/commands/errors/todos)
 - `intent_labels` (primary intent + confidence)
 - `task_breakdowns` (estimated time split)
+
+Automatic behavior:
+
+- Claude sessions auto-summarize on `SessionEnd` hook events.
+- Codex/Gemini sessions auto-summarize after sync imports new events.
+- `summarize` remains available as a manual/force command.
 
 ## Resume Packs
 

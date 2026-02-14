@@ -72,61 +72,20 @@ function run(
   return { stdout, stderr, status };
 }
 
-async function runAsync(
-  cmd: string,
-  args: string[],
-  options?: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    input?: string;
-    allowFailure?: boolean;
-  },
-): Promise<{ stdout: string; stderr: string; status: number }> {
-  return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(cmd, args, {
-      cwd: options?.cwd,
-      env: options?.env ?? process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    if (options?.input) {
-      child.stdin.write(options.input);
+async function waitForCondition(
+  check: () => boolean,
+  options?: { timeoutMs?: number; intervalMs?: number },
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? 20_000;
+  const intervalMs = options?.intervalMs ?? 300;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (check()) {
+      return;
     }
-    child.stdin.end();
-
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => {
-      rejectRun(error);
-    });
-    child.on("close", (code) => {
-      const status = code ?? 1;
-      if (status !== 0 && !options?.allowFailure) {
-        rejectRun(
-          new Error(
-            [
-              `Command failed: ${cmd} ${args.join(" ")}`,
-              `Exit code: ${status}`,
-              stdout ? `stdout:\n${stdout}` : "",
-              stderr ? `stderr:\n${stderr}` : "",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-          ),
-        );
-        return;
-      }
-      resolveRun({ stdout, stderr, status });
-    });
-  });
+    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
+  }
+  throw new Error("Timed out waiting for condition.");
 }
 
 function assert(condition: unknown, message: string): void {
@@ -370,13 +329,37 @@ async function main(): Promise<void> {
       { cwd: rootDir },
     );
 
-    await runAsync(
+    run(
       "node",
-      [distCli, "summarize", "--session", "latest", "--data-dir", dataDir],
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
       {
         cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "SessionEnd",
+          session_id: claudeSessionId,
+          cwd: workspaceDir,
+        }),
       },
     );
+
+    await waitForCondition(() => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const count = (
+          db.prepare("SELECT COUNT(*) as value FROM capsules").get() as { value: number }
+        ).value;
+        return count >= 1;
+      } finally {
+        db.close();
+      }
+    });
 
     const statsRun = run(
       "node",

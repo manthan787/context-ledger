@@ -67,6 +67,12 @@ export interface EnableClaudeResult {
   addedHooks: number;
 }
 
+export interface IngestClaudeHookResult {
+  sessionId: string;
+  hookEventName: string;
+  eventType: string;
+}
+
 const CLAUDE_HOOKS: Array<{ event: ClaudeHookEventName; matcher?: string }> = [
   { event: "SessionStart" },
   { event: "UserPromptSubmit" },
@@ -271,17 +277,17 @@ export function enableClaude(options: EnableClaudeOptions): EnableClaudeResult {
 export function ingestClaudeHookPayload(
   rawPayload: string,
   explicitDataDir?: string,
-): void {
+): IngestClaudeHookResult | null {
   const trimmedPayload = rawPayload.trim();
   if (trimmedPayload.length === 0) {
-    return;
+    return null;
   }
 
   let payload: ClaudeHookPayload;
   try {
     payload = JSON.parse(trimmedPayload) as ClaudeHookPayload;
   } catch {
-    return;
+    return null;
   }
 
   const hookEventName =
@@ -331,4 +337,10 @@ export function ingestClaudeHookPayload(
     },
     explicitDataDir,
   );
+
+  return {
+    sessionId,
+    hookEventName,
+    eventType,
+  };
 }
