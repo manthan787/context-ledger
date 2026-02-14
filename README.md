@@ -16,13 +16,15 @@ ContextLedger is a local-first CLI for tracking AI-assisted work sessions and bu
 npm install
 npm run build
 npm run start -- enable claude
+npm run start -- configure summarizer --provider ollama --model llama3.1 --capture-prompts on
 npm run start -- doctor
+npm run start -- summarize --session latest
 ```
 
 Or during development:
 
 ```bash
-npm run dev -- init
+npm run dev -- doctor
 ```
 
 ## Enable Claude
@@ -55,7 +57,8 @@ npm run start -- enable claude
 - Session boundaries and timestamps.
 - Event stream metadata.
 - Tool usage metadata (tool name, success flag, timing when available).
-- Prompt metadata only (length), not full prompt content.
+- Prompt metadata by default (`promptLength` only).
+- Optional full prompt capture when explicitly enabled.
 
 ### Verify capture
 
@@ -67,12 +70,83 @@ ctx-ledger doctor
 
 The output shows local database status and current counts for sessions, events, and tool calls.
 
+## Configure Summarizer
+
+Configure once, then summarize sessions on demand.
+
+### Ollama (local model)
+
+```bash
+ctx-ledger configure summarizer \
+  --provider ollama \
+  --model llama3.1 \
+  --capture-prompts on
+```
+
+### OpenAI
+
+```bash
+ctx-ledger configure summarizer \
+  --provider openai \
+  --model gpt-4.1-mini \
+  --capture-prompts on
+```
+
+Set API key via env var:
+
+```bash
+export OPENAI_API_KEY=...
+```
+
+Or pass it directly:
+
+```bash
+ctx-ledger configure summarizer --provider openai --model gpt-4.1-mini --api-key ...
+```
+
+### Anthropic
+
+```bash
+ctx-ledger configure summarizer \
+  --provider anthropic \
+  --model claude-3-7-sonnet-latest \
+  --capture-prompts on
+```
+
+Set API key via env var:
+
+```bash
+export ANTHROPIC_API_KEY=...
+```
+
+### View config
+
+```bash
+ctx-ledger configure show
+```
+
+## Generate Summary
+
+```bash
+ctx-ledger summarize --session latest
+```
+
+`summarize` stores:
+
+- Capsule summary (`capsules` table)
+- Primary intent classification (`intent_labels`)
+- Task/time breakdown estimates (`task_breakdowns`)
+- Outcomes and extracted artifacts (files, commands, todo items, errors)
+
 ## Commands
 
 - `ctx-ledger enable claude` installs Claude hook wiring and enables background capture.
+- `ctx-ledger configure summarizer` sets provider/model/API + prompt capture preferences.
+- `ctx-ledger configure show` prints active config (API keys redacted).
 - `ctx-ledger init` initializes local SQLite storage.
 - `ctx-ledger doctor` validates setup and shows table counts.
-- `ctx-ledger capture|summarize|resume|stats` are scaffolded for upcoming implementation.
+- `ctx-ledger summarize` generates and stores a session capsule and work classification.
+- `ctx-ledger capture|resume|stats` are scaffolded for upcoming implementation.
 
 ## Local data path
 

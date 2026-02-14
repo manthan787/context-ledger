@@ -37,6 +37,64 @@ export interface RecordEventInput {
   toolCall?: RecordToolCallInput;
 }
 
+export interface SessionSummarySession {
+  id: string;
+  provider: string;
+  agent: string;
+  repoPath: string | null;
+  branch: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  status: SessionStatus;
+}
+
+export interface SessionSummaryEvent {
+  id: string;
+  eventType: string;
+  timestamp: string;
+  payload: Record<string, unknown> | null;
+}
+
+export interface SessionSummaryToolCall {
+  id: string;
+  toolName: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  success: boolean;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface SessionSummarySource {
+  session: SessionSummarySession;
+  events: SessionSummaryEvent[];
+  toolCalls: SessionSummaryToolCall[];
+}
+
+export interface SaveCapsuleInput {
+  sessionId: string;
+  summaryMarkdown: string;
+  decisions: string[];
+  todos: string[];
+  files: string[];
+  commands: string[];
+  errors: string[];
+}
+
+export interface IntentLabelInput {
+  label: string;
+  confidence: number;
+  source: string;
+  reason?: unknown;
+}
+
+export interface TaskBreakdownInput {
+  taskLabel: string;
+  durationMinutes: number;
+  confidence: number;
+  source: string;
+}
+
 export function getDataDir(explicitDataDir?: string): string {
   return explicitDataDir ?? DEFAULT_DATA_DIR;
 }
@@ -135,6 +193,18 @@ function createSchema(db: Database.Database): void {
       metadata_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS task_breakdowns (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      task_label TEXT NOT NULL,
+      duration_minutes REAL NOT NULL,
+      confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_breakdowns_session_id ON task_breakdowns(session_id);
   `);
 }
 
@@ -174,6 +244,22 @@ function safeJson(value: unknown): string | null {
     return JSON.stringify(value);
   } catch {
     return JSON.stringify({ serializationError: true });
+  }
+}
+
+function parseJsonObject(raw: string | null): Record<string, unknown> | null {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -305,6 +391,273 @@ export function recordEvent(
   }
 
   return { eventId };
+}
+
+function resolveSessionIdFromRef(
+  db: Database.Database,
+  sessionRef: string,
+): string | null {
+  if (sessionRef !== "latest") {
+    return sessionRef;
+  }
+
+  const latest = db
+    .prepare(
+      `
+        SELECT id
+        FROM sessions
+        ORDER BY datetime(started_at) DESC
+        LIMIT 1
+      `,
+    )
+    .get() as { id: string } | undefined;
+
+  return latest?.id ?? null;
+}
+
+export function loadSessionSummarySource(
+  sessionRef: string,
+  explicitDataDir?: string,
+): SessionSummarySource | null {
+  const db = openWritableDatabase(explicitDataDir);
+  try {
+    const sessionId = resolveSessionIdFromRef(db, sessionRef);
+    if (!sessionId) {
+      return null;
+    }
+
+    const session = db
+      .prepare(
+        `
+          SELECT
+            id,
+            provider,
+            agent,
+            repo_path as repoPath,
+            branch,
+            started_at as startedAt,
+            ended_at as endedAt,
+            status
+          FROM sessions
+          WHERE id = ?
+        `,
+      )
+      .get(sessionId) as SessionSummarySession | undefined;
+
+    if (!session) {
+      return null;
+    }
+
+    const eventRows = db
+      .prepare(
+        `
+          SELECT
+            id,
+            event_type as eventType,
+            timestamp,
+            payload_json as payloadJson
+          FROM events
+          WHERE session_id = ?
+          ORDER BY datetime(timestamp) ASC
+        `,
+      )
+      .all(sessionId) as Array<{
+      id: string;
+      eventType: string;
+      timestamp: string;
+      payloadJson: string | null;
+    }>;
+
+    const toolRows = db
+      .prepare(
+        `
+          SELECT
+            id,
+            tool_name as toolName,
+            started_at as startedAt,
+            finished_at as finishedAt,
+            duration_ms as durationMs,
+            success,
+            metadata_json as metadataJson
+          FROM tool_calls
+          WHERE session_id = ?
+          ORDER BY datetime(started_at) ASC
+        `,
+      )
+      .all(sessionId) as Array<{
+      id: string;
+      toolName: string;
+      startedAt: string;
+      finishedAt: string | null;
+      durationMs: number | null;
+      success: number;
+      metadataJson: string | null;
+    }>;
+
+    return {
+      session,
+      events: eventRows.map((row) => ({
+        id: row.id,
+        eventType: row.eventType,
+        timestamp: row.timestamp,
+        payload: parseJsonObject(row.payloadJson),
+      })),
+      toolCalls: toolRows.map((row) => ({
+        id: row.id,
+        toolName: row.toolName,
+        startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
+        durationMs: row.durationMs,
+        success: row.success === 1,
+        metadata: parseJsonObject(row.metadataJson),
+      })),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+export function saveSessionCapsule(
+  input: SaveCapsuleInput,
+  explicitDataDir?: string,
+): void {
+  const db = openWritableDatabase(explicitDataDir);
+  const tx = db.transaction(() => {
+    db.prepare(
+      `
+        INSERT INTO capsules (
+          id,
+          session_id,
+          summary_markdown,
+          decisions_json,
+          todos_json,
+          files_json,
+          commands_json,
+          errors_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          summary_markdown = excluded.summary_markdown,
+          decisions_json = excluded.decisions_json,
+          todos_json = excluded.todos_json,
+          files_json = excluded.files_json,
+          commands_json = excluded.commands_json,
+          errors_json = excluded.errors_json,
+          updated_at = datetime('now')
+      `,
+    ).run(
+      randomUUID(),
+      input.sessionId,
+      input.summaryMarkdown,
+      safeJson(input.decisions),
+      safeJson(input.todos),
+      safeJson(input.files),
+      safeJson(input.commands),
+      safeJson(input.errors),
+    );
+  });
+
+  try {
+    tx();
+  } finally {
+    db.close();
+  }
+}
+
+export function replaceIntentLabelsForSession(
+  sessionId: string,
+  source: string,
+  labels: IntentLabelInput[],
+  explicitDataDir?: string,
+): void {
+  const db = openWritableDatabase(explicitDataDir);
+  const tx = db.transaction(() => {
+    db.prepare(
+      `
+        DELETE FROM intent_labels
+        WHERE session_id = ? AND source = ?
+      `,
+    ).run(sessionId, source);
+
+    const insert = db.prepare(
+      `
+        INSERT INTO intent_labels (
+          id,
+          session_id,
+          label,
+          confidence,
+          source,
+          reason_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `,
+    );
+
+    for (const label of labels) {
+      insert.run(
+        randomUUID(),
+        sessionId,
+        label.label,
+        label.confidence,
+        label.source,
+        safeJson(label.reason),
+      );
+    }
+  });
+
+  try {
+    tx();
+  } finally {
+    db.close();
+  }
+}
+
+export function replaceTaskBreakdownForSession(
+  sessionId: string,
+  source: string,
+  tasks: TaskBreakdownInput[],
+  explicitDataDir?: string,
+): void {
+  const db = openWritableDatabase(explicitDataDir);
+  const tx = db.transaction(() => {
+    db.prepare(
+      `
+        DELETE FROM task_breakdowns
+        WHERE session_id = ? AND source = ?
+      `,
+    ).run(sessionId, source);
+
+    const insert = db.prepare(
+      `
+        INSERT INTO task_breakdowns (
+          id,
+          session_id,
+          task_label,
+          duration_minutes,
+          confidence,
+          source
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `,
+    );
+
+    for (const task of tasks) {
+      insert.run(
+        randomUUID(),
+        sessionId,
+        task.taskLabel,
+        task.durationMinutes,
+        task.confidence,
+        task.source,
+      );
+    }
+  });
+
+  try {
+    tx();
+  } finally {
+    db.close();
+  }
 }
 
 export function inspectDatabase(explicitDataDir?: string): {

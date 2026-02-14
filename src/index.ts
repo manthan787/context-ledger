@@ -3,7 +3,14 @@
 import { Command } from "commander";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
+import {
+  getConfigPathForDisplay,
+  loadAppConfig,
+  saveAppConfig,
+  type SummarizerProvider,
+} from "./config";
 import { enableClaude, ingestClaudeHookPayload } from "./integrations/claude";
+import { generateSessionSummary } from "./summarization/summarizer";
 import {
   DB_FILENAME,
   DEFAULT_DATA_DIR,
@@ -11,6 +18,10 @@ import {
   getDataDir,
   initDatabase,
   inspectDatabase,
+  loadSessionSummarySource,
+  replaceIntentLabelsForSession,
+  replaceTaskBreakdownForSession,
+  saveSessionCapsule,
 } from "./storage/db";
 
 const program = new Command();
@@ -49,6 +60,122 @@ program
   .name("ctx-ledger")
   .description("ContextLedger CLI: local-first session analytics and memory handoff")
   .version("0.1.0");
+
+const configure = program
+  .command("configure")
+  .description("Configure summarizer and privacy settings");
+
+configure
+  .command("summarizer")
+  .description("Set summarizer provider/model and optional API settings")
+  .requiredOption(
+    "--provider <provider>",
+    "Provider (ollama|openai|anthropic)",
+  )
+  .requiredOption("--model <model>", "Model name")
+  .option("--api-key <key>", "API key (optional, env vars preferred)")
+  .option("--base-url <url>", "Provider base URL")
+  .option("--capture-prompts <mode>", "Prompt capture mode: on|off")
+  .option("--data-dir <path>", "Custom data directory")
+  .action(
+    (options: {
+      provider: string;
+      model: string;
+      apiKey?: string;
+      baseUrl?: string;
+      capturePrompts?: string;
+      dataDir?: string;
+    }) => {
+      const provider = options.provider.trim().toLowerCase();
+      if (
+        provider !== "ollama" &&
+        provider !== "openai" &&
+        provider !== "anthropic"
+      ) {
+        console.error(
+          `Invalid provider: ${options.provider}. Allowed values: ollama, openai, anthropic`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      const model = options.model.trim();
+      if (model.length === 0) {
+        console.error("Model is required.");
+        process.exitCode = 1;
+        return;
+      }
+
+      const normalizedProvider = provider as SummarizerProvider;
+
+      initDatabase(options.dataDir);
+      const existing = loadAppConfig(options.dataDir);
+      const nextCapturePrompts =
+        options.capturePrompts === undefined
+          ? existing.privacy?.capturePrompts ?? false
+          : options.capturePrompts.toLowerCase() === "on"
+            ? true
+            : options.capturePrompts.toLowerCase() === "off"
+              ? false
+              : null;
+
+      if (nextCapturePrompts === null) {
+        console.error(
+          `Invalid capture mode: ${options.capturePrompts}. Allowed values: on, off`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      const updatedConfig = {
+        ...existing,
+        summarizer: {
+          provider: normalizedProvider,
+          model,
+          baseUrl: options.baseUrl ?? existing.summarizer?.baseUrl,
+          apiKey: options.apiKey ?? existing.summarizer?.apiKey,
+        },
+        privacy: {
+          ...existing.privacy,
+          capturePrompts: nextCapturePrompts,
+        },
+      };
+
+      const configPath = saveAppConfig(updatedConfig, options.dataDir);
+      console.log("Summarizer configuration saved.");
+      console.log(`Config file: ${configPath}`);
+      console.log(`Provider: ${normalizedProvider}`);
+      console.log(`Model: ${model}`);
+      console.log(`Prompt capture: ${nextCapturePrompts ? "on" : "off"}`);
+      if (options.apiKey) {
+        console.log("API key: configured");
+      } else if (updatedConfig.summarizer.apiKey) {
+        console.log("API key: existing value retained");
+      } else {
+        console.log("API key: not stored (use environment variable or --api-key)");
+      }
+    },
+  );
+
+configure
+  .command("show")
+  .description("Show active ContextLedger config")
+  .option("--data-dir <path>", "Custom data directory")
+  .action((options: { dataDir?: string }) => {
+    const config = loadAppConfig(options.dataDir);
+    const redacted = {
+      ...config,
+      summarizer: config.summarizer
+        ? {
+            ...config.summarizer,
+            apiKey: config.summarizer.apiKey ? "***redacted***" : undefined,
+          }
+        : undefined,
+    };
+
+    console.log(`Config path: ${getConfigPathForDisplay(options.dataDir)}`);
+    console.log(JSON.stringify(redacted, null, 2));
+  });
 
 program
   .command("enable")
@@ -165,9 +292,94 @@ capture
 
 program
   .command("summarize")
-  .description("Generate a session capsule (not implemented yet)")
-  .action(() => {
-    console.log("summarize is scaffolded but not implemented yet.");
+  .description("Generate and store a session capsule with intent/task breakdown")
+  .option("--session <id>", "Session id or latest", "latest")
+  .option("--data-dir <path>", "Custom data directory")
+  .action(async (options: { session: string; dataDir?: string }) => {
+    initDatabase(options.dataDir);
+    const appConfig = loadAppConfig(options.dataDir);
+    const summarizer = appConfig.summarizer;
+
+    if (!summarizer) {
+      console.error("Summarizer is not configured.");
+      console.error(
+        "Run: ctx-ledger configure summarizer --provider ollama --model llama3.1 --capture-prompts on",
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    const source = loadSessionSummarySource(options.session, options.dataDir);
+    if (!source) {
+      console.error(`No session found for: ${options.session}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const promptCount = source.events.filter(
+      (event) => typeof event.payload?.prompt === "string",
+    ).length;
+    if (promptCount === 0 && !(appConfig.privacy?.capturePrompts ?? false)) {
+      console.log(
+        "Prompt capture is currently off; summary quality may be limited to metadata and tools.",
+      );
+    }
+
+    try {
+      const summary = await generateSessionSummary(source, summarizer);
+
+      saveSessionCapsule(
+        {
+          sessionId: source.session.id,
+          summaryMarkdown: summary.summaryMarkdown,
+          decisions: summary.keyOutcomes,
+          todos: summary.todoItems,
+          files: summary.filesTouched,
+          commands: summary.commands,
+          errors: summary.errors,
+        },
+        options.dataDir,
+      );
+
+      replaceIntentLabelsForSession(
+        source.session.id,
+        "summarizer",
+        [
+          {
+            label: summary.primaryIntent,
+            confidence: summary.intentConfidence,
+            source: "summarizer",
+            reason: {
+              model: summarizer.model,
+              provider: summarizer.provider,
+            },
+          },
+        ],
+        options.dataDir,
+      );
+
+      replaceTaskBreakdownForSession(
+        source.session.id,
+        "summarizer",
+        summary.tasks.map((task) => ({
+          taskLabel: task.name,
+          durationMinutes: task.minutes,
+          confidence: task.confidence,
+          source: "summarizer",
+        })),
+        options.dataDir,
+      );
+
+      console.log("Session summary stored.");
+      console.log(`Session: ${source.session.id}`);
+      console.log(`Primary intent: ${summary.primaryIntent}`);
+      console.log(`Task buckets: ${summary.tasks.length}`);
+      console.log(`Capsule outcomes: ${summary.keyOutcomes.length}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to summarize session: ${message}`);
+      process.exitCode = 1;
+    }
   });
 
 program

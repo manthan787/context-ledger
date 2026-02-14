@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { loadAppConfig } from "../config";
 import {
   getDataDir,
   getDatabasePath,
@@ -208,6 +209,19 @@ function sanitizePayload(payload: ClaudeHookPayload): Record<string, unknown> {
   return metadata;
 }
 
+function sanitizePayloadWithPrivacy(
+  payload: ClaudeHookPayload,
+  options: { capturePrompts: boolean },
+): Record<string, unknown> {
+  const metadata = sanitizePayload(payload);
+
+  if (options.capturePrompts && typeof payload.prompt === "string") {
+    metadata.prompt = payload.prompt;
+  }
+
+  return metadata;
+}
+
 export function enableClaude(options: EnableClaudeOptions): EnableClaudeResult {
   const scope = options.scope;
   const settingsPath = getSettingsPath(scope, options.cwd);
@@ -296,6 +310,9 @@ export function ingestClaudeHookPayload(
       }
     : undefined;
 
+  const appConfig = loadAppConfig(explicitDataDir);
+  const capturePrompts = appConfig.privacy?.capturePrompts ?? false;
+
   recordEvent(
     {
       sessionId,
@@ -304,7 +321,7 @@ export function ingestClaudeHookPayload(
       eventType,
       timestamp,
       repoPath,
-      payload: sanitizePayload(payload),
+      payload: sanitizePayloadWithPrivacy(payload, { capturePrompts }),
       sessionStatus: hookEventName === "SessionEnd" ? "completed" : undefined,
       toolCall,
     },
