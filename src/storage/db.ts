@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
@@ -12,6 +13,28 @@ export type SessionStatus = "active" | "completed" | "abandoned";
 export interface InitDatabaseResult {
   dbPath: string;
   dataDir: string;
+}
+
+export interface RecordToolCallInput {
+  toolName: string;
+  success: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  metadata?: unknown;
+}
+
+export interface RecordEventInput {
+  sessionId: string;
+  provider: string;
+  agent: string;
+  eventType: string;
+  timestamp?: string;
+  repoPath?: string;
+  branch?: string;
+  payload?: unknown;
+  sessionStatus?: SessionStatus;
+  toolCall?: RecordToolCallInput;
 }
 
 export function getDataDir(explicitDataDir?: string): string {
@@ -128,6 +151,160 @@ export function initDatabase(explicitDataDir?: string): InitDatabaseResult {
   }
 
   return { dbPath, dataDir };
+}
+
+function openWritableDatabase(explicitDataDir?: string): Database.Database {
+  const dataDir = getDataDir(explicitDataDir);
+  mkdirSync(dataDir, { recursive: true });
+  const dbPath = getDatabasePath(dataDir);
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  db.pragma("busy_timeout = 3000");
+  createSchema(db);
+  return db;
+}
+
+function safeJson(value: unknown): string | null {
+  if (value === undefined) {
+    return null;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify({ serializationError: true });
+  }
+}
+
+export function recordEvent(
+  input: RecordEventInput,
+  explicitDataDir?: string,
+): { eventId: string } {
+  const db = openWritableDatabase(explicitDataDir);
+  const timestamp = input.timestamp ?? new Date().toISOString();
+  const eventId = randomUUID();
+
+  const tx = db.transaction(() => {
+    const existingSession = db
+      .prepare("SELECT id FROM sessions WHERE id = ?")
+      .get(input.sessionId) as { id: string } | undefined;
+
+    if (!existingSession) {
+      db.prepare(
+        `
+          INSERT INTO sessions (
+            id,
+            provider,
+            agent,
+            repo_path,
+            branch,
+            started_at,
+            status
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `,
+      ).run(
+        input.sessionId,
+        input.provider,
+        input.agent,
+        input.repoPath ?? null,
+        input.branch ?? null,
+        timestamp,
+        input.sessionStatus ?? "active",
+      );
+    } else {
+      db.prepare(
+        `
+          UPDATE sessions
+          SET
+            repo_path = COALESCE(repo_path, ?),
+            branch = COALESCE(branch, ?),
+            updated_at = datetime('now')
+          WHERE id = ?
+        `,
+      ).run(input.repoPath ?? null, input.branch ?? null, input.sessionId);
+    }
+
+    db.prepare(
+      `
+        INSERT INTO events (
+          id,
+          session_id,
+          event_type,
+          timestamp,
+          duration_ms,
+          payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `,
+    ).run(
+      eventId,
+      input.sessionId,
+      input.eventType,
+      timestamp,
+      input.toolCall?.durationMs ?? null,
+      safeJson(input.payload),
+    );
+
+    if (input.toolCall) {
+      db.prepare(
+        `
+          INSERT INTO tool_calls (
+            id,
+            session_id,
+            event_id,
+            tool_name,
+            started_at,
+            finished_at,
+            duration_ms,
+            success,
+            metadata_json
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      ).run(
+        randomUUID(),
+        input.sessionId,
+        eventId,
+        input.toolCall.toolName,
+        input.toolCall.startedAt ?? timestamp,
+        input.toolCall.finishedAt ?? null,
+        input.toolCall.durationMs ?? null,
+        input.toolCall.success ? 1 : 0,
+        safeJson(input.toolCall.metadata),
+      );
+    }
+
+    if (
+      input.sessionStatus === "completed" ||
+      input.sessionStatus === "abandoned" ||
+      input.eventType === "session_ended"
+    ) {
+      db.prepare(
+        `
+          UPDATE sessions
+          SET
+            status = ?,
+            ended_at = COALESCE(ended_at, ?),
+            updated_at = datetime('now')
+          WHERE id = ?
+        `,
+      ).run(
+        input.sessionStatus ?? "completed",
+        timestamp,
+        input.sessionId,
+      );
+    }
+  });
+
+  try {
+    tx();
+  } finally {
+    db.close();
+  }
+
+  return { eventId };
 }
 
 export function inspectDatabase(explicitDataDir?: string): {
