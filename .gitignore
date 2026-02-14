@@ -1,0 +1,6 @@
+node_modules
+dist
+*.log
+
+# Local data directory (default for ContextLedger)
+.context-ledger
