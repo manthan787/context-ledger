@@ -51,6 +51,13 @@ export interface UsageStatsProjectRow {
   totalMinutes: number;
 }
 
+export interface UsageStatsAgentDayRow {
+  day: string;
+  agentKey: string;
+  sessions: number;
+  totalMinutes: number;
+}
+
 export interface UsageStatsResult {
   rangeLabel: string;
   sinceIso: string | null;
@@ -59,8 +66,22 @@ export interface UsageStatsResult {
   byTool: UsageStatsToolRow[];
   byAgent: UsageStatsAgentRow[];
   byDay: UsageStatsDayRow[];
+  byAgentByDay: UsageStatsAgentDayRow[];
   byPhase: UsageStatsPhaseRow[];
   byProject: UsageStatsProjectRow[];
+}
+
+export interface ActiveSessionItem {
+  id: string;
+  agentKey: string;
+  agentDisplay: string;
+  repoPath: string | null;
+  branch: string | null;
+  startedAt: string;
+  durationMinutes: number;
+  lastTool: string | null;
+  intentLabel: string | null;
+  eventCount: number;
 }
 
 export interface SessionListItem {
@@ -184,6 +205,42 @@ function durationExprSql(): string {
   `;
 }
 
+const ACTIVE_IDLE_TIMEOUT_MINUTES = 20;
+
+function lastEventTimestampExprSql(sessionAlias = "s"): string {
+  return `
+    COALESCE(
+      (SELECT MAX(e_last.timestamp) FROM events e_last WHERE e_last.session_id = ${sessionAlias}.id),
+      ${sessionAlias}.started_at
+    )
+  `;
+}
+
+function lastEventTypeExprSql(sessionAlias = "s"): string {
+  return `
+    (
+      SELECT e_last.event_type
+      FROM events e_last
+      WHERE e_last.session_id = ${sessionAlias}.id
+      ORDER BY datetime(e_last.timestamp) DESC, e_last.id DESC
+      LIMIT 1
+    )
+  `;
+}
+
+function derivedStatusExprSql(sessionAlias = "s"): string {
+  const lastEventTsExpr = lastEventTimestampExprSql(sessionAlias);
+  const lastEventTypeExpr = lastEventTypeExprSql(sessionAlias);
+  return `
+    CASE
+      WHEN ${sessionAlias}.status IN ('completed', 'abandoned') THEN ${sessionAlias}.status
+      WHEN ${lastEventTypeExpr} IN ('session_ended', 'session_stopped') THEN 'completed'
+      WHEN datetime(${lastEventTsExpr}) < datetime('now', '-${ACTIVE_IDLE_TIMEOUT_MINUTES} minutes') THEN 'completed'
+      ELSE 'active'
+    END
+  `;
+}
+
 function normalizedAgentExprSql(sessionAlias = "s"): string {
   return `
     CASE
@@ -234,6 +291,7 @@ function normalizeAgentFilterValues(values?: string[]): string[] {
 }
 
 function inferredIntentLabelExprSql(): string {
+  const derivedStatusExpr = derivedStatusExprSql("s");
   return `
     CASE
       WHEN EXISTS(
@@ -342,7 +400,7 @@ function inferredIntentLabelExprSql(): string {
       THEN 'research'
       WHEN EXISTS(SELECT 1 FROM tool_calls tc3 WHERE tc3.session_id = s.id)
       THEN 'coding'
-      WHEN s.status = 'active'
+      WHEN ${derivedStatusExpr} = 'active'
       THEN 'in_progress'
       ELSE NULL
     END
@@ -350,6 +408,7 @@ function inferredIntentLabelExprSql(): string {
 }
 
 function inferredIntentConfidenceExprSql(): string {
+  const derivedStatusExpr = derivedStatusExprSql("s");
   return `
     CASE
       WHEN EXISTS(
@@ -458,7 +517,7 @@ function inferredIntentConfidenceExprSql(): string {
       THEN 0.57
       WHEN EXISTS(SELECT 1 FROM tool_calls tc4 WHERE tc4.session_id = s.id)
       THEN 0.5
-      WHEN s.status = 'active'
+      WHEN ${derivedStatusExpr} = 'active'
       THEN 0.3
       ELSE NULL
     END
@@ -530,6 +589,7 @@ export function listSessions(
   const inferredIntentConfidenceExpr = inferredIntentConfidenceExprSql();
   const normalizedAgentExpr = normalizedAgentExprSql();
   const agentDisplayExpr = agentDisplayExprSql();
+  const derivedStatusExpr = derivedStatusExprSql();
   const { whereSql, params } = getSessionsWhereClause(sinceIso, agentFilter);
 
   try {
@@ -546,7 +606,7 @@ export function listSessions(
             s.branch,
             s.started_at as startedAt,
             s.ended_at as endedAt,
-            s.status,
+            ${derivedStatusExpr} as status,
             ${durationExpr} as durationMinutes,
             COALESCE(li.label, ${inferredIntentLabelExpr}) as intentLabel,
             COALESCE(li.confidence, ${inferredIntentConfidenceExpr}) as intentConfidence,
@@ -599,6 +659,75 @@ export function listSessions(
       intentConfidence:
         row.intentConfidence === null ? null : Number(row.intentConfidence),
       hasCapsule: row.hasCapsule === 1,
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+export function listActiveSessions(
+  explicitDataDir?: string,
+): ActiveSessionItem[] {
+  const db = openReadonly(explicitDataDir);
+  const durationExpr = durationExprSql();
+  const normalizedAgentExpr = normalizedAgentExprSql();
+  const agentDisplayExpr = agentDisplayExprSql();
+  const inferredIntentLabelExpr = inferredIntentLabelExprSql();
+  const derivedStatusExpr = derivedStatusExprSql();
+
+  try {
+    const rows = db
+      .prepare(
+        `
+          SELECT
+            s.id,
+            ${normalizedAgentExpr} as agentKey,
+            ${agentDisplayExpr} as agentDisplay,
+            s.repo_path as repoPath,
+            s.branch,
+            s.started_at as startedAt,
+            ${durationExpr} as durationMinutes,
+            (
+              SELECT tc.tool_name
+              FROM tool_calls tc
+              WHERE tc.session_id = s.id
+              ORDER BY tc.id DESC
+              LIMIT 1
+            ) as lastTool,
+            COALESCE(
+              (SELECT il.label FROM intent_labels il WHERE il.session_id = s.id ORDER BY datetime(il.created_at) DESC LIMIT 1),
+              ${inferredIntentLabelExpr}
+            ) as intentLabel,
+            (SELECT COUNT(*) FROM events e WHERE e.session_id = s.id) as eventCount
+          FROM sessions s
+          WHERE ${derivedStatusExpr} = 'active'
+          ORDER BY datetime(s.started_at) DESC
+        `,
+      )
+      .all() as Array<{
+      id: string;
+      agentKey: string;
+      agentDisplay: string;
+      repoPath: string | null;
+      branch: string | null;
+      startedAt: string;
+      durationMinutes: number | null;
+      lastTool: string | null;
+      intentLabel: string | null;
+      eventCount: number;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      agentKey: row.agentKey,
+      agentDisplay: row.agentDisplay,
+      repoPath: row.repoPath,
+      branch: row.branch,
+      startedAt: row.startedAt,
+      durationMinutes: Number(row.durationMinutes ?? 0),
+      lastTool: row.lastTool,
+      intentLabel: row.intentLabel,
+      eventCount: row.eventCount,
     }));
   } finally {
     db.close();
@@ -835,6 +964,24 @@ export function getUsageStats(
       }))
       .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
 
+    const byAgentByDayMap = groupBy(
+      sessions,
+      (row) => `${row.startedAt.slice(0, 10)}||${row.agentKey}`,
+    );
+    const byAgentByDay: UsageStatsAgentDayRow[] = [...byAgentByDayMap.entries()]
+      .map(([composite, rows]) => {
+        const [day, agentKey] = composite.split("||");
+        return {
+          day,
+          agentKey,
+          sessions: rows.length,
+          totalMinutes: Number(
+            rows.reduce((acc, row) => acc + row.durationMinutes, 0).toFixed(2),
+          ),
+        };
+      })
+      .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+
     const byPhase: UsageStatsPhaseRow[] = [
       {
         phase: "planning",
@@ -912,6 +1059,7 @@ export function getUsageStats(
       byTool,
       byAgent,
       byDay,
+      byAgentByDay,
       byPhase,
       byProject,
     };
@@ -944,6 +1092,7 @@ function loadSessionById(db: Database.Database, sessionId: string): SessionListI
   const inferredIntentConfidenceExpr = inferredIntentConfidenceExprSql();
   const normalizedAgentExpr = normalizedAgentExprSql();
   const agentDisplayExpr = agentDisplayExprSql();
+  const derivedStatusExpr = derivedStatusExprSql();
   const row = db
     .prepare(
       `
@@ -957,7 +1106,7 @@ function loadSessionById(db: Database.Database, sessionId: string): SessionListI
           s.branch,
           s.started_at as startedAt,
           s.ended_at as endedAt,
-          s.status,
+          ${derivedStatusExpr} as status,
           ${durationExpr} as durationMinutes,
           COALESCE(li.label, ${inferredIntentLabelExpr}) as intentLabel,
           COALESCE(li.confidence, ${inferredIntentConfidenceExpr}) as intentConfidence,
