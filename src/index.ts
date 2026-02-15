@@ -1272,7 +1272,7 @@ program
   .description("Start local dashboard server")
   .option("--port <port>", "Port to bind", "4173")
   .option("--data-dir <path>", "Custom data directory")
-  .action((options: { port: string; dataDir?: string }) => {
+  .action(async (options: { port: string; dataDir?: string }) => {
     initDatabase(options.dataDir);
     const syncOutcomes = syncEnabledIntegrations(options.dataDir);
     printSyncOutcomes(syncOutcomes);
@@ -1285,16 +1285,35 @@ program
       return;
     }
 
-    const server = startDashboardServer({
-      port,
-      dataDir: options.dataDir,
-    });
-    console.log(`ContextLedger dashboard running at http://127.0.0.1:${port}`);
-    console.log("Press Ctrl+C to stop.");
+    try {
+      const server = await startDashboardServer({
+        port,
+        dataDir: options.dataDir,
+      });
+      console.log(`ContextLedger dashboard running at http://127.0.0.1:${port}`);
+      console.log("Press Ctrl+C to stop.");
 
-    process.on("SIGINT", () => {
-      server.close(() => process.exit(0));
-    });
+      process.on("SIGINT", () => {
+        server.close(() => process.exit(0));
+      });
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+
+      if (code === "EADDRINUSE") {
+        console.error(`Port ${port} is already in use on 127.0.0.1.`);
+        console.error("Choose another port, e.g. `ctx-ledger dashboard --port 4174`.");
+      } else {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Failed to start dashboard: ${message}`);
+      }
+      process.exitCode = 1;
+    }
   });
 
 program

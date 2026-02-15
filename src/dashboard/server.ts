@@ -274,7 +274,7 @@ function dashboardHtml(): string {
 export function startDashboardServer(options: {
   port: number;
   dataDir?: string;
-}): ReturnType<typeof createServer> {
+}): Promise<ReturnType<typeof createServer>> {
   const server = createServer((req, res) => {
     const reqUrl = new URL(req.url ?? "/", "http://127.0.0.1");
     const pathname = reqUrl.pathname;
@@ -327,6 +327,18 @@ export function startDashboardServer(options: {
     }
   });
 
-  server.listen(options.port, "127.0.0.1");
-  return server;
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off("error", onError);
+      resolve(server);
+    };
+
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(options.port, "127.0.0.1");
+  });
 }
