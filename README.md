@@ -6,12 +6,6 @@ ContextLedger is a local-first CLI for tracking AI-assisted work across coding a
 <img width="2486" height="2096" alt="pretty_snap_2026_1_14_23_22" src="https://github.com/user-attachments/assets/90e0dfaa-43c4-46f5-a24b-4831bc4e3b1b" />
 
 
-## Stack
-
-- TypeScript + Node.js
-- SQLite (`better-sqlite3`)
-- Commander CLI
-
 ## Quickstart
 
 ```bash
@@ -42,6 +36,12 @@ ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 - enables Claude + Codex integrations
 - runs initial sync
 - launches dashboard in the background (default port `4173`, auto-fallback if busy)
+
+## Stack
+
+- TypeScript + Node.js
+- SQLite (`better-sqlite3`)
+- Commander CLI
 
 ## Integrations
 
