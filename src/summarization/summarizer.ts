@@ -466,8 +466,14 @@ async function summarizeWithOllama(
     throw new Error(`Ollama request failed: ${response.status} ${body}`);
   }
 
-  const data = (await response.json()) as { response?: string };
-  return data.response ?? "";
+  const data = (await response.json()) as { response?: string; thinking?: string };
+  const responseText = typeof data.response === "string" ? data.response.trim() : "";
+  if (responseText.length > 0) {
+    return responseText;
+  }
+
+  const thinkingText = typeof data.thinking === "string" ? data.thinking.trim() : "";
+  return thinkingText;
 }
 
 function buildFallbackSummary(source: SessionSummarySource): GeneratedSummary {
