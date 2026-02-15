@@ -8,10 +8,15 @@ ContextLedger is a local-first CLI for tracking AI-assisted work across coding a
 
 ## Quickstart
 
-```bash
-npm install
-npm run build
+Install globally from [npm](https://www.npmjs.com/package/context-ledger):
 
+```bash
+npm install -g context-ledger
+```
+
+Then run:
+
+```bash
 # One-command onboarding (recommended)
 ctx-ledger onboard
 # Alias:
