@@ -153,6 +153,8 @@ type SyncOutcome = {
 };
 
 const AUTO_SUMMARY_MAX_PER_SYNC = 4;
+const STATS_RANGE_VALUES = new Set(["24h", "7d", "30d", "all"]);
+const STATS_GROUP_VALUES = new Set(["intent", "tool", "agent", "day", "all"]);
 
 function enqueueAutoSummaries(
   sessionIds: string[],
@@ -759,7 +761,7 @@ program
 
 program
   .command("resume")
-  .description("Build, store, and optionally export a resume pack")
+  .description("Build a next-session handoff pack and store it in resume_packs")
   .option(
     "--from <sessionRef>",
     "Session id or latest (repeatable, default latest)",
@@ -770,6 +772,18 @@ program
   .option("--format <format>", "Output format (markdown|json)", "markdown")
   .option("--title <title>", "Optional resume pack title")
   .option("--out <path>", "Write output to file")
+  .addHelpText(
+    "after",
+    [
+      "",
+      "What this command does:",
+      "- Pulls selected sessions (or latest) from the local ledger.",
+      "- Uses saved capsules/task breakdowns/prompt samples to build a handoff document.",
+      "- Stores the generated pack in `resume_packs` for later listing/export.",
+      "",
+      "Tip: run `ctx-ledger summarize --session <id>` first for richer resume content.",
+    ].join("\n"),
+  )
   .option("--data-dir <path>", "Custom data directory")
   .action(
     (options: {
@@ -849,6 +863,7 @@ program
         `Resume pack saved with id: ${saved.id}`,
         `Estimated tokens: ${resume.estimatedTokens}`,
         `Sessions included: ${resume.sourceSessionIds.length}`,
+        "Content sources: summaries, outcomes, TODOs, files, commands, errors, and prompt samples (when captured).",
       ];
 
       if (options.out) {
@@ -891,6 +906,20 @@ program
         process.exitCode = 1;
         return;
       }
+      const range = options.range.trim().toLowerCase();
+      if (!STATS_RANGE_VALUES.has(range)) {
+        console.error(`Invalid range: ${options.range}. Use 24h, 7d, 30d, or all.`);
+        process.exitCode = 1;
+        return;
+      }
+      const groupBy = options.groupBy.trim().toLowerCase();
+      if (format === "table" && !STATS_GROUP_VALUES.has(groupBy)) {
+        console.error(
+          `Invalid group-by: ${options.groupBy}. Use intent, tool, agent, day, or all.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
 
       initDatabase(options.dataDir);
       const syncOutcomes = syncEnabledIntegrations(options.dataDir);
@@ -899,9 +928,8 @@ program
       }
       enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_stats");
 
-      const { label, sinceIso } = parseRange(options.range);
+      const { label, sinceIso } = parseRange(range);
       const stats = getUsageStats(label, sinceIso, options.dataDir);
-      const groupBy = options.groupBy.trim().toLowerCase();
 
       if (format === "json") {
         console.log(JSON.stringify(stats, null, 2));

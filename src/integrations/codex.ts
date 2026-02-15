@@ -128,6 +128,10 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
 
   const chunk = contentBuffer.toString("utf8", cursor);
   const lines = chunk.split(/\r?\n/);
+  let unprocessedTail = "";
+  if (chunk.length > 0 && !chunk.endsWith("\n") && !chunk.endsWith("\r")) {
+    unprocessedTail = lines.pop() ?? "";
+  }
 
   let inserted = 0;
   let skipped = 0;
@@ -168,7 +172,9 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
     inserted += 1;
   }
 
-  const nextCursor = currentLength;
+  // Keep the trailing partial line for the next sync so we do not drop events
+  // when JSONL writers flush in the middle of a line.
+  const nextCursor = currentLength - Buffer.byteLength(unprocessedTail, "utf8");
   saveAppConfig(
     {
       ...config,

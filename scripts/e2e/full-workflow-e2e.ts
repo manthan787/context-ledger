@@ -94,6 +94,47 @@ function assert(condition: unknown, message: string): void {
   }
 }
 
+function countCodexRequestEvents(dbPath: string): number {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db
+      .prepare(
+        `
+          SELECT COUNT(*) as value
+          FROM events
+          WHERE event_type = 'request_sent'
+            AND payload_json LIKE '%codex_history_jsonl%'
+        `,
+      )
+      .get() as { value: number };
+    return row.value;
+  } finally {
+    db.close();
+  }
+}
+
+function countToolCallsForSession(
+  dbPath: string,
+  sessionId: string,
+  toolName: string,
+): number {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db
+      .prepare(
+        `
+          SELECT COUNT(*) as value
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name = ?
+        `,
+      )
+      .get(sessionId, toolName) as { value: number };
+    return row.value;
+  } finally {
+    db.close();
+  }
+}
+
 function cleanup(path: string | undefined): void {
   if (!path || !existsSync(path)) {
     return;
@@ -264,6 +305,47 @@ async function main(): Promise<void> {
       { cwd: rootDir },
     );
 
+    const initialCodexCount = countCodexRequestEvents(dbPath);
+    assert(initialCodexCount === 2, "Initial codex sync should ingest two request events.");
+
+    const partialCodexEntry = JSON.stringify({
+      session_id: "codex-s1",
+      ts: 1771000900,
+      text: "Partial codex entry should be ingested only after line completion",
+    });
+    const splitIndex = Math.floor(partialCodexEntry.length / 2);
+    writeFileSync(codexHistoryPath, partialCodexEntry.slice(0, splitIndex), {
+      encoding: "utf8",
+      flag: "a",
+    });
+    run(
+      "node",
+      [distCli, "sync", "codex", "--data-dir", dataDir],
+      { cwd: rootDir },
+    );
+
+    const codexAfterPartial = countCodexRequestEvents(dbPath);
+    assert(
+      codexAfterPartial === initialCodexCount,
+      "Incomplete JSONL line should not advance codex cursor or be ingested.",
+    );
+
+    writeFileSync(codexHistoryPath, `${partialCodexEntry.slice(splitIndex)}\n`, {
+      encoding: "utf8",
+      flag: "a",
+    });
+    run(
+      "node",
+      [distCli, "sync", "codex", "--data-dir", dataDir],
+      { cwd: rootDir },
+    );
+
+    const codexAfterComplete = countCodexRequestEvents(dbPath);
+    assert(
+      codexAfterComplete === initialCodexCount + 1,
+      "Completed JSONL line should be ingested exactly once.",
+    );
+
     const claudeSessionId = "claude-e2e-session";
     run(
       "node",
@@ -304,6 +386,50 @@ async function main(): Promise<void> {
             "Fix failing CI and rotate key sk-ANOTHER_SECRET and notify admin@example.com",
         }),
       },
+    );
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "PreToolUse",
+          session_id: claudeSessionId,
+          cwd: workspaceDir,
+          tool_name: "Read",
+        }),
+      },
+    );
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "PostToolUse",
+          session_id: claudeSessionId,
+          cwd: workspaceDir,
+          tool_name: "Read",
+        }),
+      },
+    );
+    assert(
+      countToolCallsForSession(dbPath, claudeSessionId, "Read") === 1,
+      "Claude PreToolUse/PostToolUse pair should produce one tool call record.",
     );
 
     mockServer = await startMockOpenAIServer();

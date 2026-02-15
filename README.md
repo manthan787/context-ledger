@@ -165,6 +165,8 @@ ctx-ledger resume --from session-a --from session-b --format json
 ctx-ledger resume --from latest --out ./resume.md
 ```
 
+`resume` builds a handoff document for your next session by combining saved capsule data (summary/outcomes/todos/files/commands/errors), task breakdowns, and captured prompt samples when available.
+
 Stored in `resume_packs`.  
 List saved packs:
 

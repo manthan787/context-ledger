@@ -307,13 +307,13 @@ export function ingestClaudeHookPayload(
 
   const toolName =
     typeof payload.tool_name === "string" ? payload.tool_name : undefined;
-  const isToolEvent = hookEventName === "PreToolUse" || hookEventName === "PostToolUse";
-  const toolCall = isToolEvent && toolName
+  // Record tool_calls only when a tool finishes to avoid double-counting.
+  const toolCall = hookEventName === "PostToolUse" && toolName
     ? {
         toolName,
         success: true,
         startedAt: timestamp,
-        finishedAt: hookEventName === "PostToolUse" ? timestamp : undefined,
+        finishedAt: timestamp,
       }
     : undefined;
 
