@@ -144,6 +144,7 @@ Supported groups:
 
 ```bash
 ctx-ledger summarize --session latest
+ctx-ledger summarize --pending --limit 20
 ```
 
 This stores:

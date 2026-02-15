@@ -19,6 +19,7 @@ import { buildResumePack } from "./resume/pack";
 import {
   listResumePacks,
   getUsageStats,
+  listSessions,
   loadResumeSessionContexts,
   saveResumePack,
 } from "./storage/analytics";
@@ -798,12 +799,77 @@ program
   .command("summarize")
   .description("Generate and store a session capsule with intent/task breakdown")
   .option("--session <id>", "Session id or latest", "latest")
+  .option(
+    "--pending",
+    "Backfill recent sessions that are missing capsule or intent labels",
+  )
+  .option("--limit <count>", "Max sessions to process with --pending", "20")
   .option("--data-dir <path>", "Custom data directory")
-  .action(async (options: { session: string; dataDir?: string }) => {
+  .action(async (options: { session: string; pending?: boolean; limit: string; dataDir?: string }) => {
     initDatabase(options.dataDir);
     const syncOutcomes = syncEnabledIntegrations(options.dataDir);
     printSyncOutcomes(syncOutcomes);
     enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_summarize");
+
+    if (options.pending) {
+      const parsedLimit = Number(options.limit);
+      const limit = Number.isFinite(parsedLimit)
+        ? Math.max(1, Math.min(200, Math.floor(parsedLimit)))
+        : 20;
+
+      const candidates = listSessions(
+        {
+          limit,
+        },
+        options.dataDir,
+      )
+        .filter((session) => !session.hasCapsule || session.intentLabel === null)
+        .sort((a, b) => (a.startedAt < b.startedAt ? -1 : 1));
+
+      if (candidates.length === 0) {
+        console.log("No pending sessions to summarize.");
+        return;
+      }
+
+      let stored = 0;
+      let skipped = 0;
+      let failed = 0;
+      for (const session of candidates) {
+        const result = await summarizeSessionByRef({
+          sessionRef: session.id,
+          dataDir: options.dataDir,
+          source: "manual_summarize_pending",
+          skipIfFresh: false,
+        });
+
+        if (result.status === "stored") {
+          stored += 1;
+          continue;
+        }
+        if (result.status === "skipped") {
+          skipped += 1;
+          if (result.reason === "summarizer_not_configured") {
+            console.error("Summarizer is not configured.");
+            console.error(
+              "Run: ctx-ledger configure summarizer --provider ollama --model llama3.1 --capture-prompts on",
+            );
+            process.exitCode = 1;
+            return;
+          }
+          continue;
+        }
+
+        failed += 1;
+      }
+
+      console.log(
+        `Backfill complete. Processed: ${candidates.length}, stored: ${stored}, skipped: ${skipped}, failed: ${failed}.`,
+      );
+      if (failed > 0) {
+        process.exitCode = 1;
+      }
+      return;
+    }
 
     const result = await summarizeSessionByRef({
       sessionRef: options.session,
