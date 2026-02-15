@@ -33,6 +33,7 @@ import {
   inspectDatabase,
 } from "./storage/db";
 import { summarizeSessionByRef } from "./summarization/session-summary";
+import { runOnboardWizard, type ClaudeEnableScope as WizardClaudeEnableScope } from "./ui/onboard-wizard";
 
 const program = new Command();
 
@@ -862,6 +863,7 @@ program
   .option("--dashboard-port <port>", "Dashboard port to try first", "4173")
   .option("--no-dashboard", "Do not auto-start dashboard")
   .option("--data-dir <path>", "Custom data directory")
+  .option("--non-interactive", "Run in non-interactive mode (for CI/scripts)")
   .action(
     async (options: {
       scope: string;
@@ -876,7 +878,9 @@ program
       dashboardPort: string;
       dashboard: boolean;
       dataDir?: string;
+      nonInteractive?: boolean;
     }) => {
+      // Validate scope
       const scopeInput = options.scope.trim().toLowerCase();
       if (scopeInput !== "user" && scopeInput !== "project") {
         console.error(
@@ -885,8 +889,9 @@ program
         process.exitCode = 1;
         return;
       }
-      const scope = scopeInput as ClaudeEnableScope;
+      const scope = scopeInput as WizardClaudeEnableScope;
 
+      // Validate provider/model pair
       const providerInput = options.provider?.trim();
       const modelInput = options.model?.trim();
       if ((providerInput && !modelInput) || (!providerInput && modelInput)) {
@@ -907,6 +912,7 @@ program
         }
       }
 
+      // Validate dashboard port
       const requestedDashboardPort = parsePort(options.dashboardPort);
       if (options.dashboard && requestedDashboardPort === null) {
         console.error(`Invalid dashboard port: ${options.dashboardPort}`);
@@ -914,119 +920,26 @@ program
         return;
       }
 
-      const { dataDir, dbPath } = initDatabase(options.dataDir);
-      const existing = loadAppConfig(options.dataDir);
-      const nextConfig: AppConfig = {
-        ...existing,
-        summarizer:
-          provider && modelInput
-            ? {
-                provider,
-                model: modelInput,
-                baseUrl: options.baseUrl ?? existing.summarizer?.baseUrl,
-                apiKey: options.apiKey ?? existing.summarizer?.apiKey,
-              }
-            : existing.summarizer,
-        privacy: {
-          ...existing.privacy,
-          capturePrompts: true,
-          allowRemotePromptTransfer:
-            provider === "openai" || provider === "anthropic"
-              ? true
-              : existing.privacy.allowRemotePromptTransfer,
-        },
-      };
-      const configPath = saveAppConfig(nextConfig, options.dataDir);
+      // Run the wizard
+      const result = await runOnboardWizard({
+        scope,
+        provider: provider ?? undefined,
+        model: modelInput,
+        apiKey: options.apiKey,
+        baseUrl: options.baseUrl,
+        historyPath: options.historyPath,
+        sessionsPath: options.sessionsPath,
+        skipClaude: options.skipClaude,
+        skipCodex: options.skipCodex,
+        dashboardPort: requestedDashboardPort ?? 4173,
+        dashboard: options.dashboard,
+        dataDir: options.dataDir,
+        nonInteractive: options.nonInteractive,
+        resolveHookCliEntrypointPath,
+        launchDashboardInBackground,
+      });
 
-      console.log("ContextLedger onboarding complete.");
-      console.log(`Data directory: ${dataDir}`);
-      console.log(`Database: ${dbPath}`);
-      console.log(`Config file: ${configPath}`);
-      console.log("Defaults applied:");
-      console.log("- Prompt capture: on");
-      console.log(
-        `- Remote prompt transfer: ${
-          nextConfig.privacy.allowRemotePromptTransfer ? "on" : "off"
-        }`,
-      );
-
-      if (!options.skipClaude) {
-        try {
-          const claudeResult = enableClaude({
-            scope,
-            cwd: process.cwd(),
-            dataDir: options.dataDir,
-            cliEntrypointPath: resolveHookCliEntrypointPath(),
-            nodePath: process.execPath,
-          });
-          console.log(
-            `- Claude integration: enabled (${claudeResult.addedHooks} hook bindings added)`,
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.log(`- Claude integration: skipped (${message})`);
-        }
-      } else {
-        console.log("- Claude integration: skipped by option");
-      }
-
-      if (!options.skipCodex) {
-        const codexResult = enableCodex({
-          dataDir: options.dataDir,
-          historyPath: options.historyPath,
-          sessionsPath: options.sessionsPath,
-        });
-        console.log("- Codex integration: enabled");
-        console.log(`  History path: ${codexResult.historyPath}`);
-        console.log(`  Sessions path: ${codexResult.sessionsPath}`);
-      } else {
-        console.log("- Codex integration: skipped by option");
-      }
-
-      const syncOutcomes = syncEnabledIntegrations(options.dataDir);
-      printSyncOutcomes(syncOutcomes);
-      enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_onboarding");
-
-      console.log("");
-      printSummarizerRecommendation(nextConfig);
-
-      if (!options.dashboard) {
-        console.log("");
-        console.log(
-          `Start dashboard anytime: ctx-ledger dashboard --port ${
-            requestedDashboardPort ?? 4173
-          }`,
-        );
-        return;
-      }
-
-      try {
-        const launched = await launchDashboardInBackground({
-          requestedPort: requestedDashboardPort ?? 4173,
-          dataDir: options.dataDir,
-          maxPortFallbackSteps: 20,
-        });
-        console.log("");
-        console.log(
-          `Dashboard launched in background at http://127.0.0.1:${launched.selectedPort}`,
-        );
-        if (launched.selectedPort !== launched.requestedPort) {
-          console.log(
-            `Requested port ${launched.requestedPort} was busy; using ${launched.selectedPort}.`,
-          );
-        }
-        if (typeof launched.pid === "number" && Number.isFinite(launched.pid)) {
-          console.log(`Dashboard PID: ${launched.pid}`);
-        }
-        console.log(`Dashboard log: ${launched.logPath}`);
-        console.log("Onboarding finished.");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(
-          `Failed to launch dashboard in background after onboarding: ${message}`,
-        );
-        process.exitCode = 1;
-      }
+      process.exitCode = result.exitCode;
     },
   );
 
