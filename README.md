@@ -19,17 +19,6 @@ Then run:
 ```bash
 # One-command onboarding (recommended)
 ctx-ledger onboard
-# Alias:
-ctx-ledger setup
-
-# Optional: configure summarizer for intent labels + capsules
-ctx-ledger configure summarizer --provider ollama --model qwen3:4b
-
-# Analyze and generate memory handoff
-# (summaries/intents are auto-generated after session updates once summarizer is configured)
-ctx-ledger stats --range 7d
-ctx-ledger resume --from latest --budget 2000
-ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 ```
 
 ![demo](https://github.com/user-attachments/assets/07bf221f-5ca3-4184-94f4-28dde1e75a3c)
@@ -41,6 +30,18 @@ ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 - enables Claude + Codex integrations
 - runs initial sync
 - launches dashboard in the background (default port `4173`, auto-fallback if busy)
+
+You can handoff sesssions across different agents as well
+
+```
+# Analyze and generate memory handoff
+ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
+```
+
+Works from the web dashboard too!
+
+<img width="2857" height="898" alt="pretty_snap_2026_1_15_12_50" src="https://github.com/user-attachments/assets/2bbc25ba-3bd6-4bdf-bc1e-322c2dddd73c" />
+
 
 ## Stack
 
