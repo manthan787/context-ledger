@@ -156,6 +156,7 @@ type SyncOutcome = {
 const AUTO_SUMMARY_MAX_PER_SYNC = 4;
 const STATS_RANGE_VALUES = new Set(["24h", "7d", "30d", "all"]);
 const STATS_GROUP_VALUES = new Set(["intent", "tool", "agent", "day", "all"]);
+const STATS_AGENT_VALUES = new Set(["claude", "claude-code", "codex", "gemini"]);
 type HandoffAgent = "claude" | "codex";
 
 function enqueueAutoSummaries(
@@ -273,6 +274,28 @@ function ensureHandoffAgent(input: string): HandoffAgent | null {
     return value;
   }
   return null;
+}
+
+function normalizeStatsAgentFilter(values: string[]): string[] | null {
+  const out = new Set<string>();
+  for (const rawValue of values) {
+    const entries = rawValue
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0);
+
+    for (const entry of entries) {
+      if (!STATS_AGENT_VALUES.has(entry)) {
+        return null;
+      }
+      if (entry === "claude" || entry === "claude-code") {
+        out.add("claude");
+      } else {
+        out.add(entry);
+      }
+    }
+  }
+  return [...out];
 }
 
 function buildHandoffPrompt(input: {
@@ -1229,12 +1252,19 @@ program
   .description("Show usage analytics and time breakdowns")
   .option("--range <range>", "Range filter (24h|7d|30d|all)", "7d")
   .option("--group-by <group>", "Group view (intent|tool|agent|day|all)", "all")
+  .option(
+    "--agent <agent>",
+    "Agent filter (claude|codex|gemini); repeatable or comma-separated",
+    collectOption,
+    [],
+  )
   .option("--format <format>", "Output format (table|json)", "table")
   .option("--data-dir <path>", "Custom data directory")
   .action(
     (options: {
       range: string;
       groupBy: string;
+      agent: string[];
       format: string;
       dataDir?: string;
     }) => {
@@ -1258,6 +1288,14 @@ program
         process.exitCode = 1;
         return;
       }
+      const agentFilter = normalizeStatsAgentFilter(options.agent);
+      if (agentFilter === null) {
+        console.error(
+          `Invalid agent filter: ${options.agent.join(", ")}. Use claude, codex, or gemini.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
 
       initDatabase(options.dataDir);
       const syncOutcomes = syncEnabledIntegrations(options.dataDir);
@@ -1267,7 +1305,7 @@ program
       enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_stats");
 
       const { label, sinceIso } = parseRange(range);
-      const stats = getUsageStats(label, sinceIso, options.dataDir);
+      const stats = getUsageStats(label, sinceIso, options.dataDir, agentFilter);
 
       if (format === "json") {
         console.log(JSON.stringify(stats, null, 2));
@@ -1275,6 +1313,9 @@ program
       }
 
       console.log(`Range: ${stats.rangeLabel}`);
+      if (agentFilter.length > 0) {
+        console.log(`Agent Filter: ${agentFilter.join(", ")}`);
+      }
       console.log(
         `Sessions: ${stats.summary.sessions} | Minutes: ${formatNumber(
           stats.summary.totalMinutes,
@@ -1313,9 +1354,10 @@ program
       if (groupBy === "agent" || groupBy === "all") {
         console.log("By Agent");
         printTable(
-          ["Agent", "Provider", "Sessions", "Minutes"],
+          ["Agent", "Key", "Provider", "Sessions", "Minutes"],
           stats.byAgent.map((row) => [
-            row.agent,
+            row.agentDisplay,
+            row.agentKey,
             row.provider,
             String(row.sessions),
             formatNumber(row.totalMinutes),

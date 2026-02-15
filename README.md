@@ -130,6 +130,7 @@ If remote prompt transfer is disabled, captured prompt samples are excluded from
 ctx-ledger stats --range 7d
 ctx-ledger stats --range 30d --group-by tool
 ctx-ledger stats --range all --format json
+ctx-ledger stats --range all --group-by agent --agent claude
 ```
 
 Supported groups:
@@ -139,6 +140,12 @@ Supported groups:
 - `agent`
 - `day`
 - `all`
+
+Agent filter values:
+
+- `claude`
+- `codex`
+- `gemini`
 
 ## Summaries
 
@@ -202,6 +209,7 @@ Open:
 
 - `http://127.0.0.1:4173/`
 - API: `/api/stats`, `/api/sessions`, `/api/resume-packs`, `/healthz`
+- Optional API filter: `?agent=claude|codex|gemini` on `/api/stats` and `/api/sessions`
 
 ## End-to-End Tests
 

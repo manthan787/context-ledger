@@ -496,11 +496,40 @@ async function main(): Promise<void> {
       summary: { sessions: number; totalMinutes: number };
       byIntent: Array<{ label: string }>;
       byTool: Array<{ toolName: string }>;
+      byAgent: Array<{ agentKey: string }>;
     };
     assert(stats.summary.sessions >= 3, "Expected at least 3 sessions in stats.");
     assert(
       stats.byIntent.some((row) => row.label === "coding"),
       "Expected coding intent in stats output.",
+    );
+
+    const statsCodexRun = run(
+      "node",
+      [
+        distCli,
+        "stats",
+        "--range",
+        "all",
+        "--group-by",
+        "agent",
+        "--agent",
+        "codex",
+        "--format",
+        "json",
+        "--data-dir",
+        dataDir,
+      ],
+      { cwd: rootDir },
+    );
+    const statsCodex = JSON.parse(statsCodexRun.stdout) as {
+      summary: { sessions: number };
+      byAgent: Array<{ agentKey: string }>;
+    };
+    assert(statsCodex.summary.sessions >= 1, "Expected codex-filtered stats to include sessions.");
+    assert(
+      statsCodex.byAgent.every((row) => row.agentKey === "codex"),
+      "Agent-filtered stats should only include codex rows.",
     );
 
     const resumeRun = run(
@@ -624,6 +653,23 @@ async function main(): Promise<void> {
     assert(
       (apiStats.summary?.sessions ?? 0) >= 3,
       "Dashboard stats endpoint should include session data.",
+    );
+
+    const filteredStatsRes = await fetch(
+      `http://127.0.0.1:${dashboardPort}/api/stats?range=all&agent=codex`,
+    );
+    assert(filteredStatsRes.ok, "Dashboard filtered stats endpoint should return 200.");
+    const filteredApiStats = (await filteredStatsRes.json()) as {
+      summary?: { sessions?: number };
+      byAgent?: Array<{ agentKey?: string }>;
+    };
+    assert(
+      (filteredApiStats.summary?.sessions ?? 0) >= 1,
+      "Dashboard filtered stats should include codex sessions.",
+    );
+    assert(
+      (filteredApiStats.byAgent ?? []).every((row) => row.agentKey === "codex"),
+      "Dashboard filtered stats should only include codex agent rows.",
     );
 
     console.log("E2E success: full workflow validated.");

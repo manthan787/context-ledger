@@ -32,6 +32,26 @@ function parseRangeToSince(range: string): string | null {
   return null;
 }
 
+function parseAgentFilter(input: string | null): string[] {
+  if (!input) {
+    return [];
+  }
+  const normalized = input.trim().toLowerCase();
+  if (normalized.length === 0 || normalized === "all") {
+    return [];
+  }
+  const out = new Set<string>();
+  for (const value of normalized.split(",")) {
+    const entry = value.trim();
+    if (entry === "claude" || entry === "claude-code") {
+      out.add("claude");
+    } else if (entry === "codex" || entry === "gemini") {
+      out.add(entry);
+    }
+  }
+  return [...out];
+}
+
 function dashboardHtml(): string {
   return `<!doctype html>
 <html lang="en">
@@ -130,13 +150,20 @@ function dashboardHtml(): string {
     <h1>ContextLedger</h1>
     <div class="muted">Local-first usage analytics and session memory</div>
 
-    <div style="margin-top:12px">
+    <div style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <label for="range" class="muted">Range:</label>
       <select id="range">
         <option value="24h">24h</option>
         <option value="7d" selected>7d</option>
         <option value="30d">30d</option>
         <option value="all">all</option>
+      </select>
+      <label for="agent" class="muted">Agent:</label>
+      <select id="agent">
+        <option value="all" selected>all</option>
+        <option value="claude">claude</option>
+        <option value="codex">codex</option>
+        <option value="gemini">gemini</option>
       </select>
     </div>
 
@@ -224,7 +251,7 @@ function dashboardHtml(): string {
       tbody.innerHTML = rows.slice(0, 30).map((row) => \`
         <tr>
           <td><code>\${row.id}</code></td>
-          <td>\${row.agent}</td>
+          <td>\${row.agentDisplay || row.agent}</td>
           <td>\${row.intentLabel || "unlabeled"}</td>
           <td>\${row.durationMinutes.toFixed(1)}</td>
           <td>\${row.startedAt}</td>
@@ -244,14 +271,18 @@ function dashboardHtml(): string {
       \`).join("");
     }
 
-    async function load(range) {
-      const statsRes = await fetch('/api/stats?range=' + encodeURIComponent(range));
+    async function load(range, agent) {
+      const agentQuery = agent && agent !== "all"
+        ? '&agent=' + encodeURIComponent(agent)
+        : '';
+
+      const statsRes = await fetch('/api/stats?range=' + encodeURIComponent(range) + agentQuery);
       const stats = await statsRes.json();
       renderKpis(stats.summary);
       renderIntent(stats.byIntent);
       renderTools(stats.byTool);
 
-      const sessionsRes = await fetch('/api/sessions?limit=40&range=' + encodeURIComponent(range));
+      const sessionsRes = await fetch('/api/sessions?limit=40&range=' + encodeURIComponent(range) + agentQuery);
       const sessions = await sessionsRes.json();
       renderSessions(sessions);
 
@@ -261,8 +292,11 @@ function dashboardHtml(): string {
     }
 
     const rangeEl = document.getElementById("range");
-    rangeEl.addEventListener("change", () => load(rangeEl.value));
-    load(rangeEl.value).catch((err) => {
+    const agentEl = document.getElementById("agent");
+    const reload = () => load(rangeEl.value, agentEl.value);
+    rangeEl.addEventListener("change", reload);
+    agentEl.addEventListener("change", reload);
+    reload().catch((err) => {
       console.error(err);
       alert("Failed to load dashboard data. Check terminal logs.");
     });
@@ -280,6 +314,7 @@ export function startDashboardServer(options: {
     const pathname = reqUrl.pathname;
     const range = reqUrl.searchParams.get("range") ?? "7d";
     const sinceIso = parseRangeToSince(range);
+    const agentFilter = parseAgentFilter(reqUrl.searchParams.get("agent"));
 
     try {
       if (pathname === "/healthz") {
@@ -288,7 +323,7 @@ export function startDashboardServer(options: {
       }
 
       if (pathname === "/api/stats") {
-        json(res, 200, getUsageStats(range, sinceIso, options.dataDir));
+        json(res, 200, getUsageStats(range, sinceIso, options.dataDir, agentFilter));
         return;
       }
 
@@ -298,6 +333,7 @@ export function startDashboardServer(options: {
           {
             limit: Number.isFinite(limit) ? Math.max(1, Math.min(1000, limit)) : 50,
             sinceIso,
+            agentFilter,
           },
           options.dataDir,
         );

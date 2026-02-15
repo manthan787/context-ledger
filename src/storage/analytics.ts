@@ -24,7 +24,8 @@ export interface UsageStatsToolRow {
 }
 
 export interface UsageStatsAgentRow {
-  agent: string;
+  agentKey: string;
+  agentDisplay: string;
   provider: string;
   sessions: number;
   totalMinutes: number;
@@ -50,6 +51,8 @@ export interface SessionListItem {
   id: string;
   provider: string;
   agent: string;
+  agentKey: string;
+  agentDisplay: string;
   repoPath: string | null;
   branch: string | null;
   startedAt: string;
@@ -165,6 +168,55 @@ function durationExprSql(): string {
   `;
 }
 
+function normalizedAgentExprSql(sessionAlias = "s"): string {
+  return `
+    CASE
+      WHEN LOWER(${sessionAlias}.agent) IN ('claude', 'claude-code') THEN 'claude'
+      WHEN LOWER(${sessionAlias}.agent) = 'codex' THEN 'codex'
+      WHEN LOWER(${sessionAlias}.agent) = 'gemini' THEN 'gemini'
+      ELSE LOWER(${sessionAlias}.agent)
+    END
+  `;
+}
+
+function agentDisplayExprSql(sessionAlias = "s"): string {
+  return `
+    CASE
+      WHEN LOWER(${sessionAlias}.agent) IN ('claude', 'claude-code') THEN 'Claude Code'
+      WHEN LOWER(${sessionAlias}.agent) = 'codex' THEN 'Codex'
+      WHEN LOWER(${sessionAlias}.agent) = 'gemini' THEN 'Gemini'
+      ELSE ${sessionAlias}.agent
+    END
+  `;
+}
+
+function normalizeAgentFilterValues(values?: string[]): string[] {
+  if (!values || values.length === 0) {
+    return [];
+  }
+
+  const normalized = new Set<string>();
+  for (const value of values) {
+    const parts = value
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0);
+    for (const part of parts) {
+      if (part === "claude" || part === "claude-code") {
+        normalized.add("claude");
+      } else if (part === "codex") {
+        normalized.add("codex");
+      } else if (part === "gemini") {
+        normalized.add("gemini");
+      } else {
+        normalized.add(part);
+      }
+    }
+  }
+
+  return [...normalized];
+}
+
 function inferredIntentLabelExprSql(): string {
   return `
     CASE
@@ -221,46 +273,72 @@ function inferredIntentConfidenceExprSql(): string {
   `;
 }
 
-function getSinceWhereClause(sinceIso: string | null): {
+function getSessionsWhereClause(
+  sinceIso: string | null,
+  agentFilter?: string[],
+): {
   whereSql: string;
   params: unknown[];
 } {
-  if (!sinceIso) {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (sinceIso) {
+    clauses.push("datetime(s.started_at) >= datetime(?)");
+    params.push(sinceIso);
+  }
+
+  const normalizedAgents = normalizeAgentFilterValues(agentFilter);
+  if (normalizedAgents.length > 0) {
+    clauses.push(
+      `${normalizedAgentExprSql("s")} IN (${normalizedAgents.map(() => "?").join(",")})`,
+    );
+    params.push(...normalizedAgents);
+  }
+
+  if (clauses.length === 0) {
     return { whereSql: "", params: [] };
   }
 
   return {
-    whereSql: "WHERE datetime(s.started_at) >= datetime(?)",
-    params: [sinceIso],
+    whereSql: `WHERE ${clauses.join(" AND ")}`,
+    params,
   };
 }
 
-function getEventToolWhereClauseForSessions(sinceIso: string | null): {
+function getEventToolWhereClauseForSessions(
+  sinceIso: string | null,
+  agentFilter?: string[],
+): {
   whereSql: string;
   params: unknown[];
 } {
-  if (!sinceIso) {
+  const normalizedAgents = normalizeAgentFilterValues(agentFilter);
+  if (!sinceIso && normalizedAgents.length === 0) {
     return { whereSql: "", params: [] };
   }
 
+  const { whereSql, params } = getSessionsWhereClause(sinceIso, normalizedAgents);
   return {
-    whereSql:
-      "WHERE session_id IN (SELECT id FROM sessions WHERE datetime(started_at) >= datetime(?))",
-    params: [sinceIso],
+    whereSql: `WHERE session_id IN (SELECT id FROM sessions s ${whereSql})`,
+    params,
   };
 }
 
 export function listSessions(
-  options?: { limit?: number; sinceIso?: string | null },
+  options?: { limit?: number; sinceIso?: string | null; agentFilter?: string[] },
   explicitDataDir?: string,
 ): SessionListItem[] {
   const db = openReadonly(explicitDataDir);
   const limit = options?.limit ?? 50;
   const sinceIso = options?.sinceIso ?? null;
+  const agentFilter = options?.agentFilter;
   const durationExpr = durationExprSql();
   const inferredIntentLabelExpr = inferredIntentLabelExprSql();
   const inferredIntentConfidenceExpr = inferredIntentConfidenceExprSql();
-  const { whereSql, params } = getSinceWhereClause(sinceIso);
+  const normalizedAgentExpr = normalizedAgentExprSql();
+  const agentDisplayExpr = agentDisplayExprSql();
+  const { whereSql, params } = getSessionsWhereClause(sinceIso, agentFilter);
 
   try {
     const rows = db
@@ -270,6 +348,8 @@ export function listSessions(
             s.id,
             s.provider,
             s.agent,
+            ${normalizedAgentExpr} as agentKey,
+            ${agentDisplayExpr} as agentDisplay,
             s.repo_path as repoPath,
             s.branch,
             s.started_at as startedAt,
@@ -298,6 +378,8 @@ export function listSessions(
       id: string;
       provider: string;
       agent: string;
+      agentKey: string;
+      agentDisplay: string;
       repoPath: string | null;
       branch: string | null;
       startedAt: string;
@@ -313,6 +395,8 @@ export function listSessions(
       id: row.id,
       provider: row.provider,
       agent: row.agent,
+      agentKey: row.agentKey,
+      agentDisplay: row.agentDisplay,
       repoPath: row.repoPath,
       branch: row.branch,
       startedAt: row.startedAt,
@@ -350,17 +434,19 @@ export function getUsageStats(
   rangeLabel: string,
   sinceIso: string | null,
   explicitDataDir?: string,
+  agentFilter?: string[],
 ): UsageStatsResult {
   const sessions = listSessions(
     {
       limit: 100_000,
       sinceIso,
+      agentFilter,
     },
     explicitDataDir,
   );
 
   const { whereSql: eventWhereSql, params: eventParams } =
-    getEventToolWhereClauseForSessions(sinceIso);
+    getEventToolWhereClauseForSessions(sinceIso, agentFilter);
   const db = openReadonly(explicitDataDir);
   try {
     const eventsRow = db
@@ -407,13 +493,14 @@ export function getUsageStats(
 
     const byAgentMap = groupBy(
       sessions,
-      (row) => `${row.agent}||${row.provider}`,
+      (row) => `${row.agentKey}||${row.provider}`,
     );
     const byAgent: UsageStatsAgentRow[] = [...byAgentMap.entries()]
       .map(([composite, rows]) => {
-        const [agent, provider] = composite.split("||");
+        const [agentKey, provider] = composite.split("||");
         return {
-          agent,
+          agentKey,
+          agentDisplay: rows[0]?.agentDisplay ?? agentKey,
           provider,
           sessions: rows.length,
           totalMinutes: Number(
@@ -446,12 +533,12 @@ export function getUsageStats(
             SUM(CASE WHEN tc.success = 1 THEN 1 ELSE 0 END) as successCalls,
             SUM(COALESCE(tc.duration_ms, 0)) / 1000.0 as totalSeconds
           FROM tool_calls tc
-          ${sinceIso ? "WHERE tc.session_id IN (SELECT id FROM sessions WHERE datetime(started_at) >= datetime(?))" : ""}
+          ${eventWhereSql}
           GROUP BY tc.tool_name
           ORDER BY calls DESC, totalSeconds DESC
         `,
       )
-      .all(...(sinceIso ? [sinceIso] : [])) as Array<{
+      .all(...eventParams) as Array<{
       toolName: string;
       calls: number;
       successCalls: number;
@@ -501,6 +588,8 @@ function loadSessionById(db: Database.Database, sessionId: string): SessionListI
   const durationExpr = durationExprSql();
   const inferredIntentLabelExpr = inferredIntentLabelExprSql();
   const inferredIntentConfidenceExpr = inferredIntentConfidenceExprSql();
+  const normalizedAgentExpr = normalizedAgentExprSql();
+  const agentDisplayExpr = agentDisplayExprSql();
   const row = db
     .prepare(
       `
@@ -508,6 +597,8 @@ function loadSessionById(db: Database.Database, sessionId: string): SessionListI
           s.id,
           s.provider,
           s.agent,
+          ${normalizedAgentExpr} as agentKey,
+          ${agentDisplayExpr} as agentDisplay,
           s.repo_path as repoPath,
           s.branch,
           s.started_at as startedAt,
@@ -535,6 +626,8 @@ function loadSessionById(db: Database.Database, sessionId: string): SessionListI
         id: string;
         provider: string;
         agent: string;
+        agentKey: string;
+        agentDisplay: string;
         repoPath: string | null;
         branch: string | null;
         startedAt: string;
@@ -555,6 +648,8 @@ function loadSessionById(db: Database.Database, sessionId: string): SessionListI
     id: row.id,
     provider: row.provider,
     agent: row.agent,
+    agentKey: row.agentKey,
+    agentDisplay: row.agentDisplay,
     repoPath: row.repoPath,
     branch: row.branch,
     startedAt: row.startedAt,
