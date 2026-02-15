@@ -3,6 +3,7 @@
 Capture session context. Resume with intent.
 
 ContextLedger is a local-first CLI for tracking AI-assisted work across coding agents and carrying useful context into the next session.
+<img width="2813" height="2145" alt="pretty_snap_2026_1_14_20_48" src="https://github.com/user-attachments/assets/92fc1a3c-5942-4aa3-9dd3-624eb634ec7e" />
 
 ## Stack
 
