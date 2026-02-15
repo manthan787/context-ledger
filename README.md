@@ -33,7 +33,10 @@ ctx-ledger resume --from latest --budget 2000
 ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 ```
 
+![demo](https://github.com/user-attachments/assets/07bf221f-5ca3-4184-94f4-28dde1e75a3c)
+
 `onboard` defaults:
+
 
 - turns prompt capture on
 - enables Claude + Codex integrations
