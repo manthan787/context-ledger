@@ -18,15 +18,13 @@ ContextLedger is a local-first CLI for tracking AI-assisted work across coding a
 npm install
 npm run build
 
-# Enable agent capture
-ctx-ledger enable claude
-ctx-ledger enable codex
-# Optional if you use Gemini CLI/history:
-ctx-ledger enable gemini
+# One-command onboarding (recommended)
+ctx-ledger onboard
+# Alias:
+ctx-ledger setup
 
-# Configure privacy/summarizer
-ctx-ledger configure privacy --capture-prompts on --redact-secrets on --redact-emails on
-ctx-ledger configure summarizer --provider ollama --model llama3.1
+# Optional: configure summarizer for intent labels + capsules
+ctx-ledger configure summarizer --provider ollama --model qwen3:4b
 
 # Analyze and generate memory handoff
 # (summaries/intents are auto-generated after session updates once summarizer is configured)
@@ -34,6 +32,13 @@ ctx-ledger stats --range 7d
 ctx-ledger resume --from latest --budget 2000
 ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 ```
+
+`onboard` defaults:
+
+- turns prompt capture on
+- enables Claude + Codex integrations
+- runs initial sync
+- starts dashboard automatically (default port `4173`, auto-fallback if busy)
 
 ## Integrations
 

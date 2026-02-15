@@ -167,6 +167,14 @@ const STATS_GROUP_VALUES = new Set([
 ]);
 const STATS_AGENT_VALUES = new Set(["claude", "claude-code", "codex", "gemini"]);
 type HandoffAgent = "claude" | "codex";
+type ClaudeEnableScope = "user" | "project";
+type DashboardServer = Awaited<ReturnType<typeof startDashboardServer>>;
+
+interface StartDashboardRuntimeOptions {
+  port: number;
+  dataDir?: string;
+  maxPortFallbackSteps?: number;
+}
 
 function enqueueAutoSummaries(
   sessionIds: string[],
@@ -204,6 +212,127 @@ function enqueueAutoSummaries(
     });
     child.unref();
   }
+}
+
+function parsePort(value: string): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+  ) {
+    return (error as { code: string }).code;
+  }
+  return undefined;
+}
+
+function printSummarizerRecommendation(config: AppConfig): void {
+  if (config.summarizer) {
+    console.log(
+      `Summarizer: ${config.summarizer.provider}/${config.summarizer.model}`,
+    );
+    return;
+  }
+
+  console.log("Summarizer: not configured yet (recommended)");
+  console.log(
+    "Local model (recommended): ctx-ledger configure summarizer --provider ollama --model qwen3:4b",
+  );
+  console.log(
+    "OpenAI: ctx-ledger configure summarizer --provider openai --model gpt-4o-mini --api-key <key>",
+  );
+  console.log(
+    "Anthropic: ctx-ledger configure summarizer --provider anthropic --model claude-3-5-sonnet-latest --api-key <key>",
+  );
+}
+
+async function startDashboardRuntime(
+  options: StartDashboardRuntimeOptions,
+): Promise<{ port: number; server: DashboardServer }> {
+  const fallbackSteps = Math.max(0, options.maxPortFallbackSteps ?? 20);
+  const maxAttempts = fallbackSteps + 1;
+  let selectedPort = options.port;
+  let server: DashboardServer | null = null;
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      server = await startDashboardServer({
+        port: selectedPort,
+        dataDir: options.dataDir,
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+      const code = errorCode(error);
+      if (code === "EADDRINUSE" && attempt < maxAttempts - 1) {
+        selectedPort += 1;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (!server) {
+    throw (lastError ?? new Error("Failed to start dashboard server."));
+  }
+
+  console.log(`ContextLedger dashboard running at http://127.0.0.1:${selectedPort}`);
+  if (selectedPort !== options.port) {
+    console.log(
+      `Port ${options.port} was busy; started on ${selectedPort} instead.`,
+    );
+  }
+  console.log("Press Ctrl+C to stop.");
+
+  let syncInFlight = false;
+  const liveSync = (): void => {
+    if (syncInFlight) {
+      return;
+    }
+    syncInFlight = true;
+    try {
+      const liveOutcomes = syncEnabledIntegrations(options.dataDir);
+      enqueueAutoSummariesFromSync(
+        liveOutcomes,
+        options.dataDir,
+        "auto_sync_dashboard_live",
+      );
+    } catch {
+      // Dashboard live sync should never crash the server process.
+    } finally {
+      syncInFlight = false;
+    }
+  };
+
+  const liveSyncInterval = setInterval(liveSync, 2_000);
+  liveSyncInterval.unref();
+
+  let closing = false;
+  const closeServer = (): void => {
+    if (closing) {
+      return;
+    }
+    closing = true;
+    clearInterval(liveSyncInterval);
+    server.close(() => process.exit(0));
+  };
+
+  process.on("SIGINT", closeServer);
+  process.on("SIGTERM", closeServer);
+
+  return {
+    port: selectedPort,
+    server,
+  };
 }
 
 function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
@@ -618,6 +747,176 @@ configure
   });
 
 program
+  .command("onboard")
+  .alias("setup")
+  .description(
+    "One-command setup: enable defaults, wire integrations, and launch dashboard",
+  )
+  .option("--scope <scope>", "Claude hook scope (user|project)", "user")
+  .option("--provider <provider>", "Optional summarizer provider (ollama|openai|anthropic)")
+  .option("--model <model>", "Optional summarizer model")
+  .option("--api-key <key>", "Optional summarizer API key")
+  .option("--base-url <url>", "Optional summarizer base URL")
+  .option("--history-path <path>", "Custom Codex history path")
+  .option("--sessions-path <path>", "Custom Codex sessions root path")
+  .option("--skip-claude", "Skip enabling Claude integration")
+  .option("--skip-codex", "Skip enabling Codex integration")
+  .option("--dashboard-port <port>", "Dashboard port to try first", "4173")
+  .option("--no-dashboard", "Do not auto-start dashboard")
+  .option("--data-dir <path>", "Custom data directory")
+  .action(
+    async (options: {
+      scope: string;
+      provider?: string;
+      model?: string;
+      apiKey?: string;
+      baseUrl?: string;
+      historyPath?: string;
+      sessionsPath?: string;
+      skipClaude?: boolean;
+      skipCodex?: boolean;
+      dashboardPort: string;
+      dashboard: boolean;
+      dataDir?: string;
+    }) => {
+      const scopeInput = options.scope.trim().toLowerCase();
+      if (scopeInput !== "user" && scopeInput !== "project") {
+        console.error(
+          `Invalid scope: ${options.scope}. Allowed values: user, project`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const scope = scopeInput as ClaudeEnableScope;
+
+      const providerInput = options.provider?.trim();
+      const modelInput = options.model?.trim();
+      if ((providerInput && !modelInput) || (!providerInput && modelInput)) {
+        console.error("Provide both --provider and --model together.");
+        process.exitCode = 1;
+        return;
+      }
+
+      let provider: SummarizerProvider | null = null;
+      if (providerInput) {
+        provider = ensureProvider(providerInput);
+        if (!provider) {
+          console.error(
+            `Invalid provider: ${providerInput}. Allowed values: ollama, openai, anthropic`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+      }
+
+      const requestedDashboardPort = parsePort(options.dashboardPort);
+      if (options.dashboard && requestedDashboardPort === null) {
+        console.error(`Invalid dashboard port: ${options.dashboardPort}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const { dataDir, dbPath } = initDatabase(options.dataDir);
+      const existing = loadAppConfig(options.dataDir);
+      const nextConfig: AppConfig = {
+        ...existing,
+        summarizer:
+          provider && modelInput
+            ? {
+                provider,
+                model: modelInput,
+                baseUrl: options.baseUrl ?? existing.summarizer?.baseUrl,
+                apiKey: options.apiKey ?? existing.summarizer?.apiKey,
+              }
+            : existing.summarizer,
+        privacy: {
+          ...existing.privacy,
+          capturePrompts: true,
+          allowRemotePromptTransfer:
+            provider === "openai" || provider === "anthropic"
+              ? true
+              : existing.privacy.allowRemotePromptTransfer,
+        },
+      };
+      const configPath = saveAppConfig(nextConfig, options.dataDir);
+
+      console.log("ContextLedger onboarding complete.");
+      console.log(`Data directory: ${dataDir}`);
+      console.log(`Database: ${dbPath}`);
+      console.log(`Config file: ${configPath}`);
+      console.log("Defaults applied:");
+      console.log("- Prompt capture: on");
+      console.log(
+        `- Remote prompt transfer: ${
+          nextConfig.privacy.allowRemotePromptTransfer ? "on" : "off"
+        }`,
+      );
+
+      if (!options.skipClaude) {
+        try {
+          const claudeResult = enableClaude({
+            scope,
+            cwd: process.cwd(),
+            dataDir: options.dataDir,
+            cliEntrypointPath: resolveHookCliEntrypointPath(),
+            nodePath: process.execPath,
+          });
+          console.log(
+            `- Claude integration: enabled (${claudeResult.addedHooks} hook bindings added)`,
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.log(`- Claude integration: skipped (${message})`);
+        }
+      } else {
+        console.log("- Claude integration: skipped by option");
+      }
+
+      if (!options.skipCodex) {
+        const codexResult = enableCodex({
+          dataDir: options.dataDir,
+          historyPath: options.historyPath,
+          sessionsPath: options.sessionsPath,
+        });
+        console.log("- Codex integration: enabled");
+        console.log(`  History path: ${codexResult.historyPath}`);
+        console.log(`  Sessions path: ${codexResult.sessionsPath}`);
+      } else {
+        console.log("- Codex integration: skipped by option");
+      }
+
+      const syncOutcomes = syncEnabledIntegrations(options.dataDir);
+      printSyncOutcomes(syncOutcomes);
+      enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_onboarding");
+
+      console.log("");
+      printSummarizerRecommendation(nextConfig);
+
+      if (!options.dashboard) {
+        console.log("");
+        console.log(
+          `Start dashboard anytime: ctx-ledger dashboard --port ${
+            requestedDashboardPort ?? 4173
+          }`,
+        );
+        return;
+      }
+
+      try {
+        await startDashboardRuntime({
+          port: requestedDashboardPort ?? 4173,
+          dataDir: options.dataDir,
+          maxPortFallbackSteps: 20,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Failed to start dashboard after onboarding: ${message}`);
+        process.exitCode = 1;
+      }
+    },
+  );
+
+program
   .command("enable")
   .description("Enable capture integration for a coding agent")
   .argument("<agent>", "Agent to enable (claude|codex|gemini)")
@@ -785,7 +1084,7 @@ program
 
 program
   .command("init")
-  .description("Initialize local ContextLedger data store")
+  .description("Initialize local ContextLedger data store (onboarding: use `ctx-ledger onboard`)")
   .option("--data-dir <path>", "Custom data directory")
   .action((options: { dataDir?: string }) => {
     const { dbPath, dataDir } = initDatabase(options.dataDir);
@@ -1452,68 +1751,29 @@ program
     printSyncOutcomes(syncOutcomes);
     enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_dashboard");
 
-    const port = Number(options.port);
-    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+    const port = parsePort(options.port);
+    if (port === null) {
       console.error(`Invalid port: ${options.port}`);
       process.exitCode = 1;
       return;
     }
 
     try {
-      const server = await startDashboardServer({
+      await startDashboardRuntime({
         port,
         dataDir: options.dataDir,
+        maxPortFallbackSteps: 20,
       });
-      console.log(`ContextLedger dashboard running at http://127.0.0.1:${port}`);
-      console.log("Press Ctrl+C to stop.");
-
-      let syncInFlight = false;
-      const liveSync = (): void => {
-        if (syncInFlight) {
-          return;
-        }
-        syncInFlight = true;
-        try {
-          const liveOutcomes = syncEnabledIntegrations(options.dataDir);
-          enqueueAutoSummariesFromSync(
-            liveOutcomes,
-            options.dataDir,
-            "auto_sync_dashboard_live",
-          );
-        } catch {
-          // Dashboard live sync should never crash the server process.
-        } finally {
-          syncInFlight = false;
-        }
-      };
-
-      const liveSyncInterval = setInterval(liveSync, 2_000);
-      liveSyncInterval.unref();
-
-      let closing = false;
-      const closeServer = (): void => {
-        if (closing) {
-          return;
-        }
-        closing = true;
-        clearInterval(liveSyncInterval);
-        server.close(() => process.exit(0));
-      };
-
-      process.on("SIGINT", closeServer);
-      process.on("SIGTERM", closeServer);
     } catch (error) {
-      const code =
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        typeof (error as { code?: unknown }).code === "string"
-          ? (error as { code: string }).code
-          : undefined;
+      const code = errorCode(error);
 
       if (code === "EADDRINUSE") {
-        console.error(`Port ${port} is already in use on 127.0.0.1.`);
-        console.error("Choose another port, e.g. `ctx-ledger dashboard --port 4174`.");
+        console.error(
+          `No available port from ${port} to ${port + 20} on 127.0.0.1.`,
+        );
+        console.error(
+          "Choose another start port, e.g. `ctx-ledger dashboard --port 4200`.",
+        );
       } else {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Failed to start dashboard: ${message}`);
