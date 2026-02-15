@@ -162,7 +162,7 @@ This stores:
 
 Automatic behavior:
 
-- Claude sessions auto-summarize on `SessionEnd` hook events.
+- Claude sessions auto-summarize on `Stop` (turn-level) and `SessionEnd` hook events.
 - Codex/Gemini sessions auto-summarize after sync imports new events.
 - `summarize` remains available as a manual/force command.
 

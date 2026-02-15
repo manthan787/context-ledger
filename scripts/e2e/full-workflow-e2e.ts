@@ -366,6 +366,7 @@ async function main(): Promise<void> {
         }),
       },
     );
+
     run(
       "node",
       [
@@ -454,6 +455,40 @@ async function main(): Promise<void> {
       ],
       { cwd: rootDir },
     );
+
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "Stop",
+          session_id: claudeSessionId,
+          cwd: workspaceDir,
+        }),
+      },
+    );
+
+    await waitForCondition(() => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const row = db
+          .prepare(
+            "SELECT COUNT(*) as value FROM intent_labels WHERE session_id = ? AND source = ?",
+          )
+          .get(claudeSessionId, "auto_claude_turn_stop") as { value: number };
+        return row.value >= 1;
+      } finally {
+        db.close();
+      }
+    });
 
     run(
       "node",

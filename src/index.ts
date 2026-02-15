@@ -1475,7 +1475,13 @@ program
     try {
       const payload = await readStdin();
       const result = ingestClaudeHookPayload(payload, options.dataDir);
-      if (result?.hookEventName === "SessionEnd") {
+      if (result?.hookEventName === "Stop") {
+        enqueueAutoSummaries(
+          [result.sessionId],
+          options.dataDir,
+          "auto_claude_turn_stop",
+        );
+      } else if (result?.hookEventName === "SessionEnd") {
         enqueueAutoSummaries(
           [result.sessionId],
           options.dataDir,
