@@ -165,6 +165,62 @@ function durationExprSql(): string {
   `;
 }
 
+function inferredIntentLabelExprSql(): string {
+  return `
+    CASE
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e3
+        WHERE e3.session_id = s.id
+          AND e3.event_type = 'request_sent'
+          AND e3.payload_json IS NOT NULL
+          AND (
+            LOWER(e3.payload_json) LIKE '%sql%'
+            OR LOWER(e3.payload_json) LIKE '%query%'
+            OR LOWER(e3.payload_json) LIKE '%select%'
+            OR LOWER(e3.payload_json) LIKE '%join%'
+            OR LOWER(e3.payload_json) LIKE '%postgres%'
+            OR LOWER(e3.payload_json) LIKE '%mysql%'
+          )
+      )
+      THEN 'sql'
+      WHEN EXISTS(SELECT 1 FROM tool_calls tc3 WHERE tc3.session_id = s.id)
+      THEN 'coding'
+      WHEN s.status = 'active'
+      THEN 'in_progress'
+      ELSE NULL
+    END
+  `;
+}
+
+function inferredIntentConfidenceExprSql(): string {
+  return `
+    CASE
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e4
+        WHERE e4.session_id = s.id
+          AND e4.event_type = 'request_sent'
+          AND e4.payload_json IS NOT NULL
+          AND (
+            LOWER(e4.payload_json) LIKE '%sql%'
+            OR LOWER(e4.payload_json) LIKE '%query%'
+            OR LOWER(e4.payload_json) LIKE '%select%'
+            OR LOWER(e4.payload_json) LIKE '%join%'
+            OR LOWER(e4.payload_json) LIKE '%postgres%'
+            OR LOWER(e4.payload_json) LIKE '%mysql%'
+          )
+      )
+      THEN 0.56
+      WHEN EXISTS(SELECT 1 FROM tool_calls tc4 WHERE tc4.session_id = s.id)
+      THEN 0.5
+      WHEN s.status = 'active'
+      THEN 0.3
+      ELSE NULL
+    END
+  `;
+}
+
 function getSinceWhereClause(sinceIso: string | null): {
   whereSql: string;
   params: unknown[];
@@ -202,6 +258,8 @@ export function listSessions(
   const limit = options?.limit ?? 50;
   const sinceIso = options?.sinceIso ?? null;
   const durationExpr = durationExprSql();
+  const inferredIntentLabelExpr = inferredIntentLabelExprSql();
+  const inferredIntentConfidenceExpr = inferredIntentConfidenceExprSql();
   const { whereSql, params } = getSinceWhereClause(sinceIso);
 
   try {
@@ -218,8 +276,8 @@ export function listSessions(
             s.ended_at as endedAt,
             s.status,
             ${durationExpr} as durationMinutes,
-            li.label as intentLabel,
-            li.confidence as intentConfidence,
+            COALESCE(li.label, ${inferredIntentLabelExpr}) as intentLabel,
+            COALESCE(li.confidence, ${inferredIntentConfidenceExpr}) as intentConfidence,
             CASE WHEN c.session_id IS NOT NULL THEN 1 ELSE 0 END as hasCapsule
           FROM sessions s
           LEFT JOIN intent_labels li
@@ -441,6 +499,8 @@ function resolveSessionRef(db: Database.Database, sessionRef: string): string | 
 
 function loadSessionById(db: Database.Database, sessionId: string): SessionListItem | null {
   const durationExpr = durationExprSql();
+  const inferredIntentLabelExpr = inferredIntentLabelExprSql();
+  const inferredIntentConfidenceExpr = inferredIntentConfidenceExprSql();
   const row = db
     .prepare(
       `
@@ -454,8 +514,8 @@ function loadSessionById(db: Database.Database, sessionId: string): SessionListI
           s.ended_at as endedAt,
           s.status,
           ${durationExpr} as durationMinutes,
-          li.label as intentLabel,
-          li.confidence as intentConfidence,
+          COALESCE(li.label, ${inferredIntentLabelExpr}) as intentLabel,
+          COALESCE(li.confidence, ${inferredIntentConfidenceExpr}) as intentConfidence,
           CASE WHEN c.session_id IS NOT NULL THEN 1 ELSE 0 END as hasCapsule
         FROM sessions s
         LEFT JOIN intent_labels li
