@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { getUsageStats, listActiveSessions, listResumePacks, listSessions, loadResumeSessionContexts } from "../storage/analytics";
@@ -403,6 +404,40 @@ function dashboardHtml(): string {
       .grid-6-6 { grid-template-columns: 1fr; }
       .grid-4-4-4 { grid-template-columns: 1fr; }
     }
+    /* Handoff button */
+    .handoff-btn {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
+      background: var(--chip-bg); color: var(--muted); font-size: 11px; font-weight: 600;
+      cursor: pointer; white-space: nowrap; transition: all 0.15s ease;
+    }
+    .handoff-btn:hover { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
+    .handoff-btn:active { transform: scale(0.96); }
+    .handoff-btn.launching { opacity: 0.6; pointer-events: none; }
+    .handoff-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+
+    /* Handoff agent picker */
+    .handoff-popover {
+      position: absolute; z-index: 50; right: 0; top: 100%;
+      margin-top: 4px; background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+      padding: 6px; min-width: 150px; animation: fadeIn 0.15s ease;
+    }
+    [data-theme="dark"] .handoff-popover { box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+    .handoff-popover-title {
+      font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.04em; padding: 4px 8px 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px;
+    }
+    .handoff-agent-option {
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      padding: 7px 8px; border: none; background: none; border-radius: 6px;
+      cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text);
+      transition: background 0.1s ease;
+    }
+    .handoff-agent-option:hover { background: var(--chip-bg); }
+    .handoff-agent-option .agent-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .session-meta { position: relative; }
+
     @media (max-width: 640px) {
       .grid-4 { grid-template-columns: 1fr; }
       .wrap { padding: 12px 12px 32px; }
@@ -1036,6 +1071,7 @@ function dashboardHtml(): string {
           + '<span>' + row.durationMinutes.toFixed(1) + ' min</span>'
           + '<span>' + relativeTime(row.startedAt) + '</span>'
           + '<span class="capsule-icon ' + capsuleCls + '">' + capsuleSvg + '</span>'
+          + '<button class="handoff-btn" title="Open handoff in terminal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Handoff</button>'
           + '</span></div>'
           + '<div class="session-detail" id="detail-' + esc(row.id) + '"></div></div>';
       }).join('');
@@ -1142,7 +1178,65 @@ function dashboardHtml(): string {
     /* ========== Init ========== */
     var rangeEl = document.getElementById('range');
     var agentEl = document.getElementById('agent');
+    function closeHandoffPopover() {
+      var existing = document.querySelector('.handoff-popover');
+      if (existing) existing.remove();
+    }
+    function launchHandoff(btn, sessionId, agent) {
+      closeHandoffPopover();
+      btn.classList.add('launching');
+      var origText = btn.innerHTML;
+      btn.innerHTML = 'Launching...';
+      fetch('/api/handoff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sessionId, agent: agent })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) { alert('Handoff error: ' + data.error); }
+        setTimeout(function() { btn.innerHTML = origText; btn.classList.remove('launching'); }, 1500);
+      })
+      .catch(function(err) {
+        alert('Handoff failed: ' + err.message);
+        btn.innerHTML = origText;
+        btn.classList.remove('launching');
+      });
+    }
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.handoff-popover') && !e.target.closest('.handoff-btn')) {
+        closeHandoffPopover();
+      }
+    });
     document.getElementById('sessions-list').addEventListener('click', function(e) {
+      var agentOption = e.target.closest('.handoff-agent-option');
+      if (agentOption) {
+        e.stopPropagation();
+        var agent = agentOption.getAttribute('data-agent');
+        var popover = agentOption.closest('.handoff-popover');
+        var card = agentOption.closest('.session-card');
+        var btn = card ? card.querySelector('.handoff-btn') : null;
+        var sessionId = card ? card.getAttribute('data-id') : null;
+        if (btn && sessionId) launchHandoff(btn, sessionId, agent);
+        return;
+      }
+      var handoffBtn = e.target.closest('.handoff-btn');
+      if (handoffBtn) {
+        e.stopPropagation();
+        var existing = document.querySelector('.handoff-popover');
+        if (existing && existing.parentNode === handoffBtn.parentNode) {
+          closeHandoffPopover();
+          return;
+        }
+        closeHandoffPopover();
+        var popover = document.createElement('div');
+        popover.className = 'handoff-popover';
+        popover.innerHTML = '<div class="handoff-popover-title">Hand off to</div>'
+          + '<button class="handoff-agent-option" data-agent="claude"><span class="agent-dot" style="background:var(--agent-claude)"></span>Claude</button>'
+          + '<button class="handoff-agent-option" data-agent="codex"><span class="agent-dot" style="background:var(--agent-codex)"></span>Codex</button>';
+        handoffBtn.parentNode.appendChild(popover);
+        return;
+      }
       var card = e.target.closest('.session-card');
       if (card) toggleSessionDetail(card);
     });
@@ -1242,6 +1336,59 @@ export function startDashboardServer(options: {
           options.dataDir,
         );
         json(res, 200, rows);
+        return;
+      }
+
+      if (pathname === "/api/handoff" && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+            const sessionId = body.sessionId;
+            let agent = (body.agent || "claude").toLowerCase();
+            if (agent !== "claude" && agent !== "codex") agent = "claude";
+            if (!sessionId || typeof sessionId !== "string") {
+              json(res, 400, { error: "Missing sessionId" });
+              return;
+            }
+
+            const command = `ctx-ledger handoff --agent ${agent} --from ${sessionId}`;
+
+            if (process.platform === "darwin") {
+              const result = spawnSync("osascript", [
+                "-e",
+                `tell application "iTerm2"
+  activate
+  set newWindow to (create window with default profile)
+  tell current session of newWindow
+    write text "${command}"
+  end tell
+end tell`,
+              ]);
+              if (result.error) {
+                json(res, 500, { error: `Failed to open terminal: ${result.error.message}` });
+                return;
+              }
+              json(res, 200, { ok: true, command });
+            } else if (process.platform === "linux") {
+              let result = spawnSync("gnome-terminal", ["--", "bash", "-c", `${command}; exec bash`]);
+              if (result.error) {
+                result = spawnSync("xterm", ["-e", `bash -c '${command}; exec bash'`]);
+              }
+              if (result.error) {
+                json(res, 500, { error: `Failed to open terminal: ${result.error.message}` });
+                return;
+              }
+              json(res, 200, { ok: true, command });
+            } else {
+              json(res, 501, { error: `Unsupported platform: ${process.platform}` });
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            json(res, 500, { error: message });
+          }
+        });
         return;
       }
 
