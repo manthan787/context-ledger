@@ -17,6 +17,9 @@ export interface ResumePackResult {
     files: number;
     commands: number;
     errors: number;
+    activity: number;
+    handoffNotes: number;
+    sessionFacts: number;
     promptSamples: number;
   };
 }
@@ -28,6 +31,9 @@ interface RenderLimits {
   filesPerSession: number;
   commandsPerSession: number;
   errorsPerSession: number;
+  activityPerSession: number;
+  handoffNotesPerSession: number;
+  sessionFactsPerSession: number;
   promptsPerSession: number;
   summaryChars: number;
 }
@@ -108,6 +114,18 @@ function renderSessionSection(
     limits.commandsPerSession,
   );
   const errors = dedupeTrimmed(capsule?.errors ?? []).slice(0, limits.errorsPerSession);
+  const activity = dedupeTrimmed(capsule?.activity ?? []).slice(
+    0,
+    limits.activityPerSession,
+  );
+  const handoffNotes = dedupeTrimmed(capsule?.handoffNotes ?? []).slice(
+    0,
+    limits.handoffNotesPerSession,
+  );
+  const sessionFacts = dedupeTrimmed(capsule?.sessionFacts ?? []).slice(
+    0,
+    limits.sessionFactsPerSession,
+  );
   const prompts = dedupeTrimmed(context.prompts).slice(0, limits.promptsPerSession);
 
   if (outcomes.length > 0) {
@@ -141,6 +159,27 @@ function renderSessionSection(
   if (errors.length > 0) {
     lines.push("- Errors/Fixes:");
     for (const item of errors) {
+      lines.push(`  - ${item}`);
+    }
+  }
+
+  if (activity.length > 0) {
+    lines.push("- Activity Log:");
+    for (const item of activity) {
+      lines.push(`  - ${item}`);
+    }
+  }
+
+  if (handoffNotes.length > 0) {
+    lines.push("- Handoff Notes:");
+    for (const item of handoffNotes) {
+      lines.push(`  - ${item}`);
+    }
+  }
+
+  if (sessionFacts.length > 0) {
+    lines.push("- Session Facts:");
+    for (const item of sessionFacts) {
       lines.push(`  - ${item}`);
     }
   }
@@ -193,10 +232,16 @@ function renderResume(
   const carryForwardTodos = dedupeTrimmed(
     selected.flatMap((context) => context.capsule?.todos ?? []),
   ).slice(0, Math.max(5, limits.todosPerSession));
-  if (carryForwardTodos.length > 0) {
+  const carryForwardHandoff = dedupeTrimmed(
+    selected.flatMap((context) => context.capsule?.handoffNotes ?? []),
+  ).slice(0, Math.max(5, limits.handoffNotesPerSession));
+  if (carryForwardTodos.length > 0 || carryForwardHandoff.length > 0) {
     lines.push("## Immediate Next Steps");
     for (const todo of carryForwardTodos) {
       lines.push(`- ${todo}`);
+    }
+    for (const note of carryForwardHandoff) {
+      lines.push(`- ${note}`);
     }
     lines.push("");
   }
@@ -205,6 +250,18 @@ function renderResume(
 }
 
 function reduceLimits(limits: RenderLimits): boolean {
+  if (limits.activityPerSession > 2) {
+    limits.activityPerSession -= 1;
+    return true;
+  }
+  if (limits.handoffNotesPerSession > 2) {
+    limits.handoffNotesPerSession -= 1;
+    return true;
+  }
+  if (limits.sessionFactsPerSession > 2) {
+    limits.sessionFactsPerSession -= 1;
+    return true;
+  }
   if (limits.promptsPerSession > 0) {
     limits.promptsPerSession -= 1;
     return true;
@@ -254,6 +311,9 @@ export function buildResumePack(
     filesPerSession: 12,
     commandsPerSession: 12,
     errorsPerSession: 6,
+    activityPerSession: 12,
+    handoffNotesPerSession: 8,
+    sessionFactsPerSession: 8,
     promptsPerSession: 4,
     summaryChars: 500,
   };
@@ -292,6 +352,9 @@ export function buildResumePack(
       files: limits.filesPerSession,
       commands: limits.commandsPerSession,
       errors: limits.errorsPerSession,
+      activity: limits.activityPerSession,
+      handoffNotes: limits.handoffNotesPerSession,
+      sessionFacts: limits.sessionFactsPerSession,
       promptSamples: limits.promptsPerSession,
     },
   };

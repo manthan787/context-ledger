@@ -32,13 +32,28 @@ export interface CodexSessionFileStateConfig {
   branch?: string;
 }
 
+export interface ClaudeSessionFileStateConfig {
+  sessionId?: string;
+  repoPath?: string;
+  branch?: string;
+}
+
 export interface CodexIntegrationConfig extends HistoryIntegrationConfig {
   sessionsPath?: string;
   sessionFileCursors?: Record<string, number>;
   sessionFileState?: Record<string, CodexSessionFileStateConfig>;
 }
 
+export interface ClaudeIntegrationConfig {
+  enabled: boolean;
+  projectsPath: string;
+  sessionFileCursors?: Record<string, number>;
+  sessionFileState?: Record<string, ClaudeSessionFileStateConfig>;
+  backfillComplete?: boolean;
+}
+
 export interface IntegrationsConfig {
+  claude?: ClaudeIntegrationConfig;
   codex?: CodexIntegrationConfig;
   gemini?: HistoryIntegrationConfig;
 }
@@ -142,6 +157,40 @@ function normalizeSessionFileCursors(input: unknown): Record<string, number> | u
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function normalizeSessionFileState(
+  input: unknown,
+): Record<string, { sessionId?: string; repoPath?: string; branch?: string }> | undefined {
+  const out: Record<string, { sessionId?: string; repoPath?: string; branch?: string }> = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+
+  for (const [filePath, raw] of Object.entries(input as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const state = raw as Record<string, unknown>;
+    const sessionId =
+      typeof state.sessionId === "string" && state.sessionId.trim().length > 0
+        ? state.sessionId.trim()
+        : undefined;
+    const repoPath =
+      typeof state.repoPath === "string" && state.repoPath.trim().length > 0
+        ? state.repoPath.trim()
+        : undefined;
+    const branch =
+      typeof state.branch === "string" && state.branch.trim().length > 0
+        ? state.branch.trim()
+        : undefined;
+    if (!sessionId && !repoPath && !branch) {
+      continue;
+    }
+    out[filePath] = { sessionId, repoPath, branch };
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function normalizeCodexIntegrationConfig(input: unknown): CodexIntegrationConfig | undefined {
   const base = normalizeIntegrationConfig(input);
   if (!base) {
@@ -157,44 +206,44 @@ function normalizeCodexIntegrationConfig(input: unknown): CodexIntegrationConfig
       ? candidate.sessionsPath.trim()
       : undefined;
   const sessionFileCursors = normalizeSessionFileCursors(candidate.sessionFileCursors);
-  const sessionFileState: Record<string, CodexSessionFileStateConfig> = {};
-  if (
-    candidate.sessionFileState &&
-    typeof candidate.sessionFileState === "object" &&
-    !Array.isArray(candidate.sessionFileState)
-  ) {
-    for (const [filePath, raw] of Object.entries(
-      candidate.sessionFileState as Record<string, unknown>,
-    )) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        continue;
-      }
-      const state = raw as Record<string, unknown>;
-      const sessionId =
-        typeof state.sessionId === "string" && state.sessionId.trim().length > 0
-          ? state.sessionId.trim()
-          : undefined;
-      const repoPath =
-        typeof state.repoPath === "string" && state.repoPath.trim().length > 0
-          ? state.repoPath.trim()
-          : undefined;
-      const branch =
-        typeof state.branch === "string" && state.branch.trim().length > 0
-          ? state.branch.trim()
-          : undefined;
-      if (!sessionId && !repoPath && !branch) {
-        continue;
-      }
-      sessionFileState[filePath] = { sessionId, repoPath, branch };
-    }
-  }
+  const sessionFileState = normalizeSessionFileState(
+    candidate.sessionFileState,
+  ) as Record<string, CodexSessionFileStateConfig> | undefined;
 
   return {
     ...base,
     sessionsPath,
     sessionFileCursors,
-    sessionFileState:
-      Object.keys(sessionFileState).length > 0 ? sessionFileState : undefined,
+    sessionFileState,
+  };
+}
+
+function normalizeClaudeIntegrationConfig(input: unknown): ClaudeIntegrationConfig | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+
+  const candidate = input as Record<string, unknown>;
+  const projectsPath =
+    typeof candidate.projectsPath === "string" ? candidate.projectsPath.trim() : "";
+  if (projectsPath.length === 0) {
+    return undefined;
+  }
+
+  const sessionFileCursors = normalizeSessionFileCursors(candidate.sessionFileCursors);
+  const sessionFileState = normalizeSessionFileState(
+    candidate.sessionFileState,
+  ) as Record<string, ClaudeSessionFileStateConfig> | undefined;
+
+  return {
+    enabled: candidate.enabled !== false,
+    projectsPath,
+    sessionFileCursors,
+    sessionFileState,
+    backfillComplete:
+      typeof candidate.backfillComplete === "boolean"
+        ? candidate.backfillComplete
+        : undefined,
   };
 }
 
@@ -243,6 +292,7 @@ function normalizeConfig(input: unknown): AppConfig {
       ? (raw.integrations as Record<string, unknown>)
       : null;
 
+  const claude = normalizeClaudeIntegrationConfig(integrationsRaw?.claude);
   const codex = normalizeCodexIntegrationConfig(integrationsRaw?.codex);
   const gemini = normalizeIntegrationConfig(integrationsRaw?.gemini);
 
@@ -252,8 +302,11 @@ function normalizeConfig(input: unknown): AppConfig {
     privacy,
   };
 
-  if (codex || gemini) {
+  if (claude || codex || gemini) {
     normalized.integrations = {};
+    if (claude) {
+      normalized.integrations.claude = claude;
+    }
     if (codex) {
       normalized.integrations.codex = codex;
     }

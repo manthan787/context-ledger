@@ -79,6 +79,9 @@ export interface SaveCapsuleInput {
   files: string[];
   commands: string[];
   errors: string[];
+  activity: string[];
+  handoffNotes: string[];
+  sessionFacts: string[];
 }
 
 export interface IntentLabelInput {
@@ -184,6 +187,9 @@ function createSchema(db: Database.Database): void {
       files_json TEXT,
       commands_json TEXT,
       errors_json TEXT,
+      activity_json TEXT,
+      handoff_notes_json TEXT,
+      session_facts_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -211,6 +217,29 @@ function createSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_task_breakdowns_session_id ON task_breakdowns(session_id);
   `);
+
+  ensureCapsuleColumns(db);
+}
+
+function ensureCapsuleColumns(db: Database.Database): void {
+  const rows = db
+    .prepare("PRAGMA table_info(capsules)")
+    .all() as Array<{ name: string }>;
+  if (rows.length === 0) {
+    return;
+  }
+
+  const existing = new Set(rows.map((row) => row.name));
+  const maybeAddColumn = (columnName: string): void => {
+    if (!existing.has(columnName)) {
+      db.exec(`ALTER TABLE capsules ADD COLUMN ${columnName} TEXT`);
+      existing.add(columnName);
+    }
+  };
+
+  maybeAddColumn("activity_json");
+  maybeAddColumn("handoff_notes_json");
+  maybeAddColumn("session_facts_json");
 }
 
 export function initDatabase(explicitDataDir?: string): InitDatabaseResult {
@@ -554,9 +583,12 @@ export function saveSessionCapsule(
           todos_json,
           files_json,
           commands_json,
-          errors_json
+          errors_json,
+          activity_json,
+          handoff_notes_json,
+          session_facts_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
           summary_markdown = excluded.summary_markdown,
           decisions_json = excluded.decisions_json,
@@ -564,6 +596,9 @@ export function saveSessionCapsule(
           files_json = excluded.files_json,
           commands_json = excluded.commands_json,
           errors_json = excluded.errors_json,
+          activity_json = excluded.activity_json,
+          handoff_notes_json = excluded.handoff_notes_json,
+          session_facts_json = excluded.session_facts_json,
           updated_at = datetime('now')
       `,
     ).run(
@@ -575,6 +610,9 @@ export function saveSessionCapsule(
       safeJson(input.files),
       safeJson(input.commands),
       safeJson(input.errors),
+      safeJson(input.activity),
+      safeJson(input.handoffNotes),
+      safeJson(input.sessionFacts),
     );
   });
 

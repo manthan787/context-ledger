@@ -102,6 +102,9 @@ export async function summarizeSessionByRef(
         files: summary.filesTouched,
         commands: summary.commands,
         errors: summary.errors,
+        activity: summary.activity,
+        handoffNotes: summary.handoffNotes,
+        sessionFacts: summary.sessionFacts,
       },
       options.dataDir,
     );

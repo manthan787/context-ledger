@@ -13,7 +13,11 @@ import {
   type SummarizerProvider,
 } from "./config";
 import { startDashboardServer } from "./dashboard/server";
-import { enableClaude, ingestClaudeHookPayload } from "./integrations/claude";
+import {
+  enableClaude,
+  ingestClaudeHookPayload,
+  syncClaudeBackfill,
+} from "./integrations/claude";
 import { enableCodex, syncCodexHistory } from "./integrations/codex";
 import { enableGemini, syncGeminiHistory } from "./integrations/gemini";
 import { buildResumePack } from "./resume/pack";
@@ -147,7 +151,7 @@ function formatNumber(value: number, fractionDigits = 1): string {
 }
 
 type SyncOutcome = {
-  provider: "codex" | "gemini";
+  provider: "claude" | "codex" | "gemini";
   status: "ok" | "skipped";
   inserted: number;
   skipped: number;
@@ -437,6 +441,26 @@ async function startDashboardRuntime(
 function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
   const config = loadAppConfig(explicitDataDir);
   const outcomes: SyncOutcome[] = [];
+
+  if (
+    config.integrations?.claude?.enabled &&
+    !config.integrations.claude.backfillComplete
+  ) {
+    const result = syncClaudeBackfill({
+      dataDir: explicitDataDir,
+      projectsPath: config.integrations.claude.projectsPath,
+      force: false,
+    });
+    outcomes.push({
+      provider: "claude",
+      status: result.status,
+      inserted: result.inserted,
+      skipped: result.skipped,
+      touchedSessionIds: result.touchedSessionIds,
+      summarySessionIds: result.touchedSessionIds,
+      reason: result.reason,
+    });
+  }
 
   if (config.integrations?.codex?.enabled) {
     const result = syncCodexHistory({
@@ -856,6 +880,7 @@ program
   .option("--model <model>", "Optional summarizer model")
   .option("--api-key <key>", "Optional summarizer API key")
   .option("--base-url <url>", "Optional summarizer base URL")
+  .option("--claude-projects-path <path>", "Custom Claude projects path for one-time backfill")
   .option("--history-path <path>", "Custom Codex history path")
   .option("--sessions-path <path>", "Custom Codex sessions root path")
   .option("--skip-claude", "Skip enabling Claude integration")
@@ -871,6 +896,7 @@ program
       model?: string;
       apiKey?: string;
       baseUrl?: string;
+      claudeProjectsPath?: string;
       historyPath?: string;
       sessionsPath?: string;
       skipClaude?: boolean;
@@ -927,6 +953,7 @@ program
         model: modelInput,
         apiKey: options.apiKey,
         baseUrl: options.baseUrl,
+        claudeProjectsPath: options.claudeProjectsPath,
         historyPath: options.historyPath,
         sessionsPath: options.sessionsPath,
         skipClaude: options.skipClaude,
@@ -948,6 +975,7 @@ program
   .description("Enable capture integration for a coding agent")
   .argument("<agent>", "Agent to enable (claude|codex|gemini)")
   .option("--scope <scope>", "Integration scope (user|project)", "user")
+  .option("--projects-path <path>", "Custom Claude projects path")
   .option("--history-path <path>", "Custom history path (codex/gemini)")
   .option("--sessions-path <path>", "Custom sessions root path (codex)")
   .option("--data-dir <path>", "Custom data directory")
@@ -956,6 +984,7 @@ program
       agent: string,
       options: {
         scope: string;
+        projectsPath?: string;
         historyPath?: string;
         sessionsPath?: string;
         dataDir?: string;
@@ -976,6 +1005,7 @@ program
           scope: options.scope,
           cwd: process.cwd(),
           dataDir: options.dataDir,
+          projectsPath: options.projectsPath,
           cliEntrypointPath: resolveHookCliEntrypointPath(),
           nodePath: process.execPath,
         });
@@ -986,11 +1016,27 @@ program
         console.log(`Data directory: ${result.dataDir}`);
         console.log(`Database: ${result.dbPath}`);
         console.log(`Hook bindings added: ${result.addedHooks}`);
+        console.log(`Projects path: ${result.projectsPath}`);
+        if (result.trackedSessionFiles > 0) {
+          console.log(`Tracked session files: ${result.trackedSessionFiles}`);
+        }
         if (result.addedHooks === 0) {
           console.log(
             "No new hook bindings were needed (existing ContextLedger hooks already present).",
           );
         }
+        const backfill = syncClaudeBackfill({
+          dataDir: options.dataDir,
+          projectsPath: result.projectsPath,
+          force: false,
+        });
+        console.log(
+          `Initial backfill: ${backfill.status} (inserted ${backfill.inserted}, skipped ${backfill.skipped})`,
+        );
+        if (backfill.reason) {
+          console.log(`Reason: ${backfill.reason}`);
+        }
+        enqueueAutoSummaries(backfill.touchedSessionIds, options.dataDir, "auto_claude_backfill");
         return;
       }
 
@@ -1049,21 +1095,42 @@ program
 program
   .command("sync")
   .description("Sync enabled external history integrations")
-  .argument("[agent]", "Specific integration to sync (codex|gemini|all)", "all")
+  .argument("[agent]", "Specific integration to sync (claude|codex|gemini|all)", "all")
+  .option("--projects-path <path>", "Override Claude projects path for claude sync")
   .option("--history-path <path>", "Override history path for the specific sync target")
   .option("--sessions-path <path>", "Override sessions path for codex sync")
+  .option("--force", "Force sync even if target reports already complete")
   .option("--data-dir <path>", "Custom data directory")
   .action(
     (
       agent: string,
       options: {
+        projectsPath?: string;
         historyPath?: string;
         sessionsPath?: string;
+        force?: boolean;
         dataDir?: string;
       },
     ) => {
       const target = agent.trim().toLowerCase();
       const outcomes: SyncOutcome[] = [];
+
+      if (target === "claude" || target === "all") {
+        const result = syncClaudeBackfill({
+          dataDir: options.dataDir,
+          projectsPath: target === "claude" ? options.projectsPath : undefined,
+          force: options.force === true,
+        });
+        outcomes.push({
+          provider: "claude",
+          status: result.status,
+          inserted: result.inserted,
+          skipped: result.skipped,
+          touchedSessionIds: result.touchedSessionIds,
+          summarySessionIds: result.touchedSessionIds,
+          reason: result.reason,
+        });
+      }
 
       if (target === "codex" || target === "all") {
         const result = syncCodexHistory({
@@ -1099,7 +1166,7 @@ program
       }
 
       if (outcomes.length === 0) {
-        console.error(`Invalid sync target: ${agent}. Use codex, gemini, or all.`);
+        console.error(`Invalid sync target: ${agent}. Use claude, codex, gemini, or all.`);
         process.exitCode = 1;
         return;
       }
@@ -1152,8 +1219,16 @@ program
 
     console.log("");
     console.log("Integrations:");
+    const claude = config.integrations?.claude;
     const codex = config.integrations?.codex;
     const gemini = config.integrations?.gemini;
+    console.log(
+      `- claude: ${
+        claude
+          ? `${claude.enabled ? "enabled" : "disabled"} (projects: ${claude.projectsPath}, backfill: ${claude.backfillComplete ? "done" : "pending"})`
+          : "not configured"
+      }`,
+    );
     console.log(
       `- codex: ${
         codex
@@ -1396,7 +1471,7 @@ program
         `Resume pack saved with id: ${saved.id}`,
         `Estimated tokens: ${resume.estimatedTokens}`,
         `Sessions included: ${resume.sourceSessionIds.length}`,
-        "Content sources: summaries, outcomes, TODOs, files, commands, errors, and prompt samples (when captured).",
+        "Content sources: summaries, outcomes, TODOs, files, commands, errors, activity logs, handoff notes, session facts, and prompt samples (when captured).",
       ];
 
       if (options.out) {

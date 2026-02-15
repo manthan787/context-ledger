@@ -1070,6 +1070,9 @@ function dashboardHtml(): string {
       if (capsule && capsule.summaryMarkdown) h += '<div class="capsule-section"><h4>Summary</h4><pre>' + esc(capsule.summaryMarkdown) + '</pre></div>';
       if (capsule && capsule.decisions && capsule.decisions.length) h += '<div class="capsule-section"><h4>Decisions</h4><ul>' + capsule.decisions.map(function(d){return '<li>'+esc(d)+'</li>';}).join('') + '</ul></div>';
       if (capsule && capsule.todos && capsule.todos.length) h += '<div class="capsule-section"><h4>Todos</h4><ul>' + capsule.todos.map(function(t){return '<li>'+esc(t)+'</li>';}).join('') + '</ul></div>';
+      if (capsule && capsule.activity && capsule.activity.length) h += '<div class="capsule-section"><h4>Activity</h4><ul>' + capsule.activity.slice(0,20).map(function(a){return '<li>'+esc(a)+'</li>';}).join('') + (capsule.activity.length > 20 ? '<li class="muted">+' + (capsule.activity.length - 20) + ' more</li>' : '') + '</ul></div>';
+      if (capsule && capsule.handoffNotes && capsule.handoffNotes.length) h += '<div class="capsule-section"><h4>Handoff Notes</h4><ul>' + capsule.handoffNotes.map(function(n){return '<li>'+esc(n)+'</li>';}).join('') + '</ul></div>';
+      if (capsule && capsule.sessionFacts && capsule.sessionFacts.length) h += '<div class="capsule-section"><h4>Session Facts</h4><ul>' + capsule.sessionFacts.map(function(f){return '<li>'+esc(f)+'</li>';}).join('') + '</ul></div>';
       if (capsule && capsule.files && capsule.files.length) {
         var files = capsule.files, shown = files.slice(0,15), extra = files.length - 15;
         h += '<div class="capsule-section"><h4>Files</h4><div class="capsule-files">' + shown.map(function(f){return esc(f);}).join('<br>') + (extra > 0 ? '<br><span class="muted">+' + extra + ' more</span>' : '') + '</div></div>';

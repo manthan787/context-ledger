@@ -8,7 +8,7 @@ import {
   type AppConfig,
   type SummarizerProvider,
 } from "../config";
-import { enableClaude } from "../integrations/claude";
+import { enableClaude, syncClaudeBackfill } from "../integrations/claude";
 import { enableCodex, syncCodexHistory } from "../integrations/codex";
 import { enableGemini, syncGeminiHistory } from "../integrations/gemini";
 import { initDatabase, getDataDir } from "../storage/db";
@@ -21,6 +21,7 @@ export interface OnboardWizardOptions {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+  claudeProjectsPath?: string;
   historyPath?: string;
   sessionsPath?: string;
   skipClaude?: boolean;
@@ -49,7 +50,7 @@ interface IntegrationSelection {
 }
 
 interface SyncOutcome {
-  provider: "codex" | "gemini";
+  provider: "claude" | "codex" | "gemini";
   status: "ok" | "skipped";
   inserted: number;
   skipped: number;
@@ -195,6 +196,7 @@ async function stepInstallClaudeHooks(
       scope,
       cwd: process.cwd(),
       dataDir: options.dataDir,
+      projectsPath: options.claudeProjectsPath,
       cliEntrypointPath: options.resolveHookCliEntrypointPath(),
       nodePath: process.execPath,
     });
@@ -266,6 +268,49 @@ async function stepSyncSessions(
   integrations: IntegrationSelection,
 ): Promise<SyncOutcome[]> {
   const outcomes: SyncOutcome[] = [];
+
+  if (integrations.claude) {
+    const s = p.spinner();
+    s.start("Backfilling Claude sessions");
+
+    try {
+      const config = loadAppConfig(options.dataDir);
+      const result = syncClaudeBackfill({
+        dataDir: options.dataDir,
+        projectsPath: config.integrations?.claude?.projectsPath ?? options.claudeProjectsPath,
+        force: false,
+      });
+
+      if (result.status === "ok") {
+        s.stop(`Imported ${result.inserted} Claude events`);
+        outcomes.push({
+          provider: "claude",
+          status: "ok",
+          inserted: result.inserted,
+          skipped: result.skipped,
+        });
+      } else {
+        s.stop(`Claude backfill skipped: ${result.reason ?? "unknown reason"}`);
+        outcomes.push({
+          provider: "claude",
+          status: "skipped",
+          inserted: 0,
+          skipped: 0,
+          reason: result.reason,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      s.stop(`Claude backfill failed: ${message}`);
+      outcomes.push({
+        provider: "claude",
+        status: "skipped",
+        inserted: 0,
+        skipped: 0,
+        reason: message,
+      });
+    }
+  }
 
   if (integrations.codex) {
     const s = p.spinner();
@@ -571,7 +616,7 @@ export async function runOnboardWizard(
   }
 
   // Step 4: Sync existing sessions
-  if (integrations.codex || integrations.gemini) {
+  if (integrations.claude || integrations.codex || integrations.gemini) {
     await stepSyncSessions(options, integrations);
   }
 
@@ -655,12 +700,14 @@ async function runNonInteractiveOnboard(
         scope,
         cwd: process.cwd(),
         dataDir: options.dataDir,
+        projectsPath: options.claudeProjectsPath,
         cliEntrypointPath: options.resolveHookCliEntrypointPath(),
         nodePath: process.execPath,
       });
       console.log(
         `- Claude integration: enabled (${claudeResult.addedHooks} hook bindings added)`,
       );
+      console.log(`  Projects path: ${claudeResult.projectsPath}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.log(`- Claude integration: skipped (${message})`);
@@ -685,6 +732,21 @@ async function runNonInteractiveOnboard(
   // Sync integrations
   const config = loadAppConfig(options.dataDir);
   const syncOutcomes: SyncOutcome[] = [];
+
+  if (config.integrations?.claude?.enabled) {
+    const result = syncClaudeBackfill({
+      dataDir: options.dataDir,
+      projectsPath: config.integrations.claude.projectsPath,
+      force: false,
+    });
+    syncOutcomes.push({
+      provider: "claude",
+      status: result.status,
+      inserted: result.inserted,
+      skipped: result.skipped,
+      reason: result.reason,
+    });
+  }
 
   if (config.integrations?.codex?.enabled) {
     const result = syncCodexHistory({

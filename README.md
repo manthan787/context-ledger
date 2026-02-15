@@ -49,8 +49,11 @@ ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 
 `ctx-ledger enable claude` installs async command hooks into Claude settings.
 
+It also performs a one-time backfill from local Claude session logs so existing sessions are available immediately after setup.
+
 - User scope (default): `~/.claude/settings.json`
 - Project scope: `.claude/settings.local.json`
+- Backfill source: `~/.claude/projects/**/*.jsonl` (customizable via `--projects-path`)
 
 Captured events:
 
@@ -82,13 +85,17 @@ Captured events:
 
 ```bash
 ctx-ledger sync all
+ctx-ledger sync claude
 ctx-ledger sync codex
 ctx-ledger sync gemini
 # Optional for codex:
 ctx-ledger sync codex --sessions-path /path/to/.codex/sessions
+# Optional for claude:
+ctx-ledger sync claude --projects-path /path/to/.claude/projects --force
 ```
 
-`stats`, `summarize`, `resume`, `handoff`, and `dashboard` automatically run sync for enabled Codex/Gemini integrations.
+`stats`, `summarize`, `resume`, `handoff`, and `dashboard` automatically run sync for enabled integrations.  
+For Claude, this automatic sync runs the one-time backfill (if pending) and then ongoing capture continues via hooks.
 
 ## Privacy & Redaction
 
@@ -177,7 +184,7 @@ ctx-ledger summarize --pending --limit 20
 
 This stores:
 
-- `capsules` (session summary, outcomes, files/commands/errors/todos)
+- `capsules` (session summary, outcomes, files/commands/errors/todos, activity timeline, handoff notes, session facts)
 - `intent_labels` (primary intent + confidence)
 - `task_breakdowns` (estimated time split)
 
@@ -205,7 +212,7 @@ ctx-ledger resume --from session-a --from session-b --format json
 ctx-ledger resume --from latest --out ./resume.md
 ```
 
-`resume` builds a handoff document for your next session by combining saved capsule data (summary/outcomes/todos/files/commands/errors), task breakdowns, and captured prompt samples when available.
+`resume` builds a handoff document for your next session by combining saved capsule data (summary/outcomes/todos/files/commands/errors/activity/handoff-notes/session-facts), task breakdowns, and captured prompt samples when available.
 
 Stored in `resume_packs`.  
 List saved packs:
@@ -267,7 +274,7 @@ npm run test:e2e:full -- --keep-artifacts
 ## Commands
 
 - `ctx-ledger enable <claude|codex|gemini>`
-- `ctx-ledger sync <codex|gemini|all>`
+- `ctx-ledger sync <claude|codex|gemini|all>`
 - `ctx-ledger configure summarizer`
 - `ctx-ledger configure privacy`
 - `ctx-ledger configure show`

@@ -108,6 +108,9 @@ export interface CapsuleData {
   files: string[];
   commands: string[];
   errors: string[];
+  activity: string[];
+  handoffNotes: string[];
+  sessionFacts: string[];
 }
 
 export interface TaskBreakdownData {
@@ -1196,7 +1199,10 @@ export function loadResumeSessionContexts(
               todos_json as todosJson,
               files_json as filesJson,
               commands_json as commandsJson,
-              errors_json as errorsJson
+              errors_json as errorsJson,
+              activity_json as activityJson,
+              handoff_notes_json as handoffNotesJson,
+              session_facts_json as sessionFactsJson
             FROM capsules
             WHERE session_id = ?
           `,
@@ -1209,6 +1215,9 @@ export function loadResumeSessionContexts(
             filesJson: string | null;
             commandsJson: string | null;
             errorsJson: string | null;
+            activityJson: string | null;
+            handoffNotesJson: string | null;
+            sessionFactsJson: string | null;
           }
         | undefined;
 
@@ -1264,6 +1273,9 @@ export function loadResumeSessionContexts(
               files: parseJsonStringArray(capsuleRow.filesJson),
               commands: parseJsonStringArray(capsuleRow.commandsJson),
               errors: parseJsonStringArray(capsuleRow.errorsJson),
+              activity: parseJsonStringArray(capsuleRow.activityJson),
+              handoffNotes: parseJsonStringArray(capsuleRow.handoffNotesJson),
+              sessionFacts: parseJsonStringArray(capsuleRow.sessionFactsJson),
             }
           : null,
         prompts,

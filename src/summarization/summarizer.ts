@@ -4,6 +4,10 @@ import { SessionSummarySource } from "../storage/db";
 
 const MAX_PROMPT_SAMPLES = 15;
 const MAX_PROMPT_CHARS = 700;
+const MAX_ACTIVITY_ITEMS = 80;
+const MAX_HANDOFF_ITEMS = 40;
+const MAX_SESSION_FACTS = 20;
+const MAX_PROMPT_TRACE_EVENTS = 80;
 const REQUEST_TIMEOUT_MS = 45_000;
 
 const IntentSchema = z
@@ -28,6 +32,9 @@ const SummaryOutputSchema = z.object({
   commands: z.array(z.string()).default([]),
   errors: z.array(z.string()).default([]),
   todoItems: z.array(z.string()).default([]),
+  activity: z.array(z.string()).default([]),
+  handoffNotes: z.array(z.string()).default([]),
+  sessionFacts: z.array(z.string()).default([]),
   primaryIntent: IntentSchema.default("other"),
   intentConfidence: z.coerce.number().min(0).max(1).default(0.5),
   tasks: z
@@ -48,6 +55,9 @@ export interface GeneratedSummary {
   commands: string[];
   errors: string[];
   todoItems: string[];
+  activity: string[];
+  handoffNotes: string[];
+  sessionFacts: string[];
   primaryIntent: string;
   intentConfidence: number;
   tasks: Array<{
@@ -320,6 +330,217 @@ function getSessionDurationMinutes(source: SessionSummarySource): number {
   return 0;
 }
 
+function truncateInline(input: string, maxChars = 180): string {
+  const normalized = input.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(24, maxChars - 3)).trimEnd()}...`;
+}
+
+function toIsoOrFallback(input: string): string {
+  const parsed = Date.parse(input);
+  if (Number.isFinite(parsed)) {
+    return new Date(parsed).toISOString();
+  }
+  return input;
+}
+
+function describeToolCall(
+  toolName: string,
+  success: boolean,
+  durationMs: number | null,
+  metadata?: Record<string, unknown> | null,
+): string {
+  const parts = [`${toolName} ${success ? "succeeded" : "failed"}`];
+  if (typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0) {
+    parts.push(`in ${Math.round(durationMs)}ms`);
+  }
+  const exitCode =
+    typeof metadata?.exitCode === "number" && Number.isFinite(metadata.exitCode)
+      ? metadata.exitCode
+      : undefined;
+  if (exitCode !== undefined) {
+    parts.push(`(exit ${exitCode})`);
+  }
+  return parts.join(" ");
+}
+
+function buildToolDetailLines(source: SessionSummarySource, maxItems = 120): string[] {
+  return source.toolCalls
+    .slice(0, maxItems)
+    .map((toolCall) => {
+      const when = toIsoOrFallback(toolCall.finishedAt ?? toolCall.startedAt);
+      const detail = describeToolCall(
+        toolCall.toolName,
+        toolCall.success,
+        toolCall.durationMs,
+        toolCall.metadata,
+      );
+      return `- ${when} ${detail}`;
+    });
+}
+
+function buildEventTraceLines(
+  source: SessionSummarySource,
+  options?: { includePromptText?: boolean; maxItems?: number },
+): string[] {
+  const includePromptText = options?.includePromptText ?? true;
+  const maxItems = options?.maxItems ?? MAX_PROMPT_TRACE_EVENTS;
+  const out: string[] = [];
+
+  for (const event of source.events) {
+    const ts = toIsoOrFallback(event.timestamp);
+    if (event.eventType === "request_sent") {
+      const prompt = typeof event.payload?.prompt === "string" ? event.payload.prompt : "";
+      if (includePromptText && prompt.trim().length > 0) {
+        out.push(`- ${ts} request: ${truncateInline(prompt, 220)}`);
+      } else {
+        out.push(`- ${ts} request sent`);
+      }
+    } else if (event.eventType === "tool_pre_use") {
+      const toolName =
+        typeof event.payload?.toolName === "string"
+          ? event.payload.toolName
+          : "unknown_tool";
+      out.push(`- ${ts} tool start: ${toolName}`);
+    } else if (event.eventType === "tool_post_use") {
+      const toolName =
+        typeof event.payload?.toolName === "string"
+          ? event.payload.toolName
+          : "unknown_tool";
+      out.push(`- ${ts} tool finish: ${toolName}`);
+    } else if (event.eventType.startsWith("session_")) {
+      out.push(`- ${ts} ${event.eventType}`);
+    } else if (
+      event.eventType === "notification" ||
+      event.eventType === "pre_compact" ||
+      event.eventType === "subagent_stopped"
+    ) {
+      out.push(`- ${ts} ${event.eventType}`);
+    }
+
+    if (out.length >= maxItems) {
+      break;
+    }
+  }
+
+  return trimList(out, maxItems);
+}
+
+function buildDerivedSessionFacts(
+  source: SessionSummarySource,
+  durationMinutes: number,
+): string[] {
+  const facts: string[] = [];
+  const succeededTools = source.toolCalls.filter((call) => call.success).length;
+  const failedTools = source.toolCalls.length - succeededTools;
+  const topTools = [...source.toolCalls]
+    .reduce((map, call) => {
+      map.set(call.toolName, (map.get(call.toolName) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>());
+  const topToolSummary = [...topTools.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([name, count]) => `${name} (${count})`)
+    .join(", ");
+
+  facts.push(`Session ID: ${source.session.id}`);
+  facts.push(`Agent: ${source.session.agent} (${source.session.provider})`);
+  facts.push(`Repo: ${source.session.repoPath ?? "unknown"}`);
+  facts.push(`Branch: ${source.session.branch ?? "unknown"}`);
+  facts.push(
+    `Lifecycle: ${source.session.status}; duration ${durationMinutes} min; events ${source.events.length}; tool calls ${source.toolCalls.length}.`,
+  );
+  if (source.toolCalls.length > 0) {
+    facts.push(`Tool outcomes: ${succeededTools} succeeded, ${failedTools} failed.`);
+  }
+  if (topToolSummary.length > 0) {
+    facts.push(`Top tools: ${topToolSummary}`);
+  }
+  return trimList(facts, MAX_SESSION_FACTS);
+}
+
+function buildDerivedActivity(source: SessionSummarySource): string[] {
+  const items: Array<{ timestamp: string; line: string }> = [];
+
+  for (const eventLine of buildEventTraceLines(source, { includePromptText: true, maxItems: 120 })) {
+    const match = eventLine.match(/^- (\S+) (.*)$/);
+    if (!match) {
+      continue;
+    }
+    items.push({
+      timestamp: match[1],
+      line: match[2],
+    });
+  }
+
+  for (const toolCall of source.toolCalls) {
+    const timestamp = toIsoOrFallback(toolCall.finishedAt ?? toolCall.startedAt);
+    items.push({
+      timestamp,
+      line: describeToolCall(
+        toolCall.toolName,
+        toolCall.success,
+        toolCall.durationMs,
+        toolCall.metadata,
+      ),
+    });
+  }
+
+  items.sort((a, b) => {
+    const left = Date.parse(a.timestamp);
+    const right = Date.parse(b.timestamp);
+    if (Number.isFinite(left) && Number.isFinite(right)) {
+      return left - right;
+    }
+    return a.timestamp.localeCompare(b.timestamp);
+  });
+
+  return trimList(
+    items.map((item) => `${item.timestamp} ${item.line}`),
+    MAX_ACTIVITY_ITEMS,
+  );
+}
+
+function buildDerivedHandoffNotes(
+  source: SessionSummarySource,
+  todos: string[],
+  errors: string[],
+): string[] {
+  const notes: string[] = [];
+  const promptSamples = collectPromptSamples(source, MAX_PROMPT_SAMPLES);
+  const lastPrompt = promptSamples.length > 0 ? promptSamples[promptSamples.length - 1] : null;
+  const failedToolNames = trimList(
+    source.toolCalls
+      .filter((call) => !call.success)
+      .map((call) => call.toolName),
+    8,
+  );
+
+  if (source.session.branch) {
+    notes.push(`Continue work on branch ${source.session.branch}.`);
+  }
+  if (source.session.repoPath) {
+    notes.push(`Workspace path: ${source.session.repoPath}.`);
+  }
+  if (lastPrompt && lastPrompt.length > 0) {
+    notes.push(`Latest user request: ${truncateInline(lastPrompt, 200)}`);
+  }
+  for (const todo of todos.slice(0, 8)) {
+    notes.push(`Follow-up: ${todo}`);
+  }
+  for (const error of errors.slice(0, 6)) {
+    notes.push(`Watch-out: ${error}`);
+  }
+  if (failedToolNames.length > 0) {
+    notes.push(`Review failed tools: ${failedToolNames.join(", ")}.`);
+  }
+
+  return trimList(notes, MAX_HANDOFF_ITEMS);
+}
+
 function buildPrompt(
   source: SessionSummarySource,
   options?: GenerateSummaryOptions,
@@ -356,6 +577,11 @@ function buildPrompt(
       : promptSamples.map((sample, idx) => `- [${idx + 1}] ${sample}`).join("\n");
 
   const durationMinutes = getSessionDurationMinutes(source);
+  const eventTrace = buildEventTraceLines(source, {
+    includePromptText: includePromptSamples,
+  });
+  const toolDetails = buildToolDetailLines(source);
+  const derivedSessionFacts = buildDerivedSessionFacts(source, durationMinutes);
 
   return [
     "You are analyzing a local coding-assistant session log.",
@@ -368,6 +594,9 @@ function buildPrompt(
     '  "commands": ["string"],',
     '  "errors": ["string"],',
     '  "todoItems": ["string"],',
+    '  "activity": ["string"],',
+    '  "handoffNotes": ["string"],',
+    '  "sessionFacts": ["string"],',
     '  "primaryIntent": "coding|coding/frontend|coding/frontend/design|research|research/tech-qna|incident|deploy|sql|docs|other",',
     '  "intentConfidence": 0.0,',
     '  "tasks": [{"name":"string","minutes":0,"confidence":0.0}]',
@@ -381,6 +610,9 @@ function buildPrompt(
     "- Prefer `coding/frontend/design`, `coding/frontend`, `coding`, `research/tech-qna`, `research`, `incident`, `deploy`, `sql`, or `docs` when there is evidence; use `other` only when evidence is sparse.",
     "- `tasks` should estimate where time went (minutes) and sum close to session duration.",
     "- Keep `filesTouched` to likely file paths only.",
+    "- `activity` should describe concrete actions taken by the agent, in chronological order when possible.",
+    "- `handoffNotes` should be next-session guidance for another coding agent (open work, caveats, blockers).",
+    "- `sessionFacts` should be durable factual context (repo/branch/status/tool outcomes).",
     "- Keep outputs concise and factual.",
     "",
     "Session metadata:",
@@ -398,6 +630,17 @@ function buildPrompt(
     "",
     "Event types:",
     eventSummary.length > 0 ? eventSummary : "- none",
+    "",
+    "Chronological trace:",
+    eventTrace.length > 0 ? eventTrace.join("\n") : "- none",
+    "",
+    "Tool call details:",
+    toolDetails.length > 0 ? toolDetails.join("\n") : "- none",
+    "",
+    "Derived factual hints:",
+    derivedSessionFacts.length > 0
+      ? derivedSessionFacts.map((item) => `- ${item}`).join("\n")
+      : "- none",
     "",
     "Captured prompt samples:",
     promptSummary,
@@ -578,6 +821,9 @@ function buildFallbackSummary(source: SessionSummarySource): GeneratedSummary {
   const durationMinutes = getSessionDurationMinutes(source);
   const inferredIntent = inferIntentFromSignals(source);
   const outcome = `Session ${source.session.id} contains ${source.events.length} events and ${source.toolCalls.length} tool calls.`;
+  const activity = buildDerivedActivity(source);
+  const sessionFacts = buildDerivedSessionFacts(source, durationMinutes);
+  const handoffNotes = buildDerivedHandoffNotes(source, [], []);
   const summaryMarkdown = [
     "## Session Summary",
     "",
@@ -593,6 +839,9 @@ function buildFallbackSummary(source: SessionSummarySource): GeneratedSummary {
     commands: [],
     errors: [],
     todoItems: [],
+    activity,
+    handoffNotes,
+    sessionFacts,
     primaryIntent: inferredIntent.intent,
     intentConfidence: inferredIntent.confidence,
     tasks:
@@ -690,6 +939,21 @@ export async function generateSessionSummary(
   const commands = trimList(parsed.commands, 200);
   const errors = trimList(parsed.errors, 200);
   const todos = trimList(parsed.todoItems, 200);
+  const derivedActivity = buildDerivedActivity(source);
+  const derivedSessionFacts = buildDerivedSessionFacts(source, durationMinutes);
+  const derivedHandoffNotes = buildDerivedHandoffNotes(source, todos, errors);
+  const activity = trimList(
+    [...parsed.activity, ...derivedActivity],
+    MAX_ACTIVITY_ITEMS,
+  );
+  const handoffNotes = trimList(
+    [...parsed.handoffNotes, ...derivedHandoffNotes],
+    MAX_HANDOFF_ITEMS,
+  );
+  const sessionFacts = trimList(
+    [...parsed.sessionFacts, ...derivedSessionFacts],
+    MAX_SESSION_FACTS,
+  );
 
   const summaryMarkdown = [
     "## Session Summary",
@@ -700,6 +964,14 @@ export async function generateSessionSummary(
     "",
     "## Key Outcomes",
     ...(keyOutcomes.length > 0 ? keyOutcomes.map((item) => `- ${item}`) : ["- none"]),
+    "",
+    "## Activity",
+    ...(activity.length > 0 ? activity.slice(0, 20).map((item) => `- ${item}`) : ["- none"]),
+    "",
+    "## Handoff Notes",
+    ...(handoffNotes.length > 0
+      ? handoffNotes.slice(0, 12).map((item) => `- ${item}`)
+      : ["- none"]),
     "",
     "## Primary Intent",
     `- ${primaryIntent} (${intentConfidence.toFixed(2)})`,
@@ -712,6 +984,9 @@ export async function generateSessionSummary(
     commands,
     errors,
     todoItems: todos,
+    activity,
+    handoffNotes,
+    sessionFacts,
     primaryIntent,
     intentConfidence,
     tasks: normalizedTasks,
