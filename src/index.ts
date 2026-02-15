@@ -358,34 +358,58 @@ const configure = program
 configure
   .command("summarizer")
   .description("Set summarizer provider/model and optional API settings")
-  .requiredOption(
+  .argument("[provider]", "Provider (ollama|openai|anthropic)")
+  .argument("[model]", "Model name")
+  .option(
     "--provider <provider>",
     "Provider (ollama|openai|anthropic)",
   )
-  .requiredOption("--model <model>", "Model name")
+  .option("--model <model>", "Model name")
   .option("--api-key <key>", "API key (optional, env vars preferred)")
   .option("--base-url <url>", "Provider base URL")
   .option("--capture-prompts <mode>", "Prompt capture mode: on|off")
   .option("--data-dir <path>", "Custom data directory")
   .action(
-    (options: {
-      provider: string;
-      model: string;
-      apiKey?: string;
-      baseUrl?: string;
-      capturePrompts?: BooleanMode;
-      dataDir?: string;
-    }) => {
-      const provider = ensureProvider(options.provider);
-      if (!provider) {
+    (
+      providerArg: string | undefined,
+      modelArg: string | undefined,
+      options: {
+        provider?: string;
+        model?: string;
+        apiKey?: string;
+        baseUrl?: string;
+        capturePrompts?: BooleanMode;
+        dataDir?: string;
+      },
+    ) => {
+      const providerInput = options.provider ?? providerArg;
+      const modelInput = options.model ?? modelArg;
+
+      if (!providerInput || !modelInput) {
+        console.error("Provider and model are required.");
         console.error(
-          `Invalid provider: ${options.provider}. Allowed values: ollama, openai, anthropic`,
+          "Use either: ctx-ledger configure summarizer --provider ollama --model qwen3:4b",
+        );
+        console.error(
+          "Or: ctx-ledger configure summarizer ollama qwen3:4b",
+        );
+        console.error(
+          "If using npm scripts, pass args after -- (example: npm run dev -- configure summarizer --provider ollama --model qwen3:4b).",
         );
         process.exitCode = 1;
         return;
       }
 
-      const model = options.model.trim();
+      const provider = ensureProvider(providerInput);
+      if (!provider) {
+        console.error(
+          `Invalid provider: ${providerInput}. Allowed values: ollama, openai, anthropic`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      const model = modelInput.trim();
       if (model.length === 0) {
         console.error("Model is required.");
         process.exitCode = 1;
