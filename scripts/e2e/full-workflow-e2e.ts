@@ -520,6 +520,38 @@ async function main(): Promise<void> {
       "Resume markdown should include session context.",
     );
 
+    const handoffRun = run(
+      "node",
+      [
+        distCli,
+        "handoff",
+        "--agent",
+        "codex",
+        "--from",
+        "latest",
+        "--no-launch",
+        "--format",
+        "json",
+        "--data-dir",
+        dataDir,
+      ],
+      { cwd: rootDir },
+    );
+    const handoff = JSON.parse(handoffRun.stdout) as {
+      resumePackId: string;
+      agent: string;
+      prompt: string;
+    };
+    assert(handoff.agent === "codex", "Handoff output should include target agent.");
+    assert(
+      handoff.prompt.includes("Validate current repository state before making edits."),
+      "Handoff prompt should include verify-first instruction.",
+    );
+    assert(
+      handoff.prompt.includes("## Prior Session Context"),
+      "Handoff prompt should embed resume context section.",
+    );
+
     const db = new Database(dbPath, { readonly: true });
     try {
       const payloadRows = db
@@ -546,7 +578,7 @@ async function main(): Promise<void> {
         db.prepare("SELECT COUNT(*) as value FROM resume_packs").get() as { value: number }
       ).value;
       assert(capsuleCount >= 1, "Expected at least one stored capsule.");
-      assert(resumeCount >= 1, "Expected at least one stored resume pack.");
+      assert(resumeCount >= 2, "Expected resume + handoff to store resume packs.");
     } finally {
       db.close();
     }

@@ -30,6 +30,7 @@ ctx-ledger configure summarizer --provider ollama --model llama3.1
 # (summaries/intents are auto-generated after session updates once summarizer is configured)
 ctx-ledger stats --range 7d
 ctx-ledger resume --from latest --budget 2000
+ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 ```
 
 ## Integrations
@@ -72,7 +73,7 @@ ctx-ledger sync codex
 ctx-ledger sync gemini
 ```
 
-`stats`, `summarize`, `resume`, and `dashboard` automatically run sync for enabled Codex/Gemini integrations.
+`stats`, `summarize`, `resume`, `handoff`, and `dashboard` automatically run sync for enabled Codex/Gemini integrations.
 
 ## Privacy & Redaction
 
@@ -174,6 +175,22 @@ List saved packs:
 ctx-ledger resume-packs
 ```
 
+## Agent Handoff
+
+Start a coding agent with verify-first context injected from stored session data:
+
+```bash
+ctx-ledger handoff --agent claude --from latest
+ctx-ledger handoff --agent codex --from latest --from session-a
+```
+
+Generate only (without launching an agent):
+
+```bash
+ctx-ledger handoff --agent claude --from latest --no-launch --format markdown --out ./handoff.md
+ctx-ledger handoff --agent codex --from latest --no-launch --format json
+```
+
 ## Dashboard
 
 ```bash
@@ -214,6 +231,7 @@ npm run test:e2e:full -- --keep-artifacts
 - `ctx-ledger configure show`
 - `ctx-ledger summarize`
 - `ctx-ledger resume`
+- `ctx-ledger handoff`
 - `ctx-ledger resume-packs`
 - `ctx-ledger stats`
 - `ctx-ledger dashboard`

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -155,6 +155,7 @@ type SyncOutcome = {
 const AUTO_SUMMARY_MAX_PER_SYNC = 4;
 const STATS_RANGE_VALUES = new Set(["24h", "7d", "30d", "all"]);
 const STATS_GROUP_VALUES = new Set(["intent", "tool", "agent", "day", "all"]);
+type HandoffAgent = "claude" | "codex";
 
 function enqueueAutoSummaries(
   sessionIds: string[],
@@ -263,6 +264,86 @@ function ensureProvider(input: string): SummarizerProvider | null {
     return value;
   }
   return null;
+}
+
+function ensureHandoffAgent(input: string): HandoffAgent | null {
+  const value = input.trim().toLowerCase();
+  if (value === "claude" || value === "codex") {
+    return value;
+  }
+  return null;
+}
+
+function buildHandoffPrompt(input: {
+  agent: HandoffAgent;
+  resumePackId: string;
+  resumeTitle: string;
+  sourceSessionIds: string[];
+  estimatedTokens: number;
+  resumeMarkdown: string;
+}): string {
+  const agentLabel = input.agent === "claude" ? "Claude Code" : "Codex";
+
+  return [
+    `# ContextLedger Handoff for ${agentLabel}`,
+    "",
+    `Generated: ${new Date().toISOString()}`,
+    `Resume Pack ID: ${input.resumePackId}`,
+    `Resume Title: ${input.resumeTitle}`,
+    `Source Sessions: ${input.sourceSessionIds.join(", ")}`,
+    `Estimated Tokens: ${input.estimatedTokens}`,
+    "",
+    "You are continuing prior work. Follow this order strictly:",
+    "1. Validate current repository state before making edits.",
+    "2. Confirm branch, dirty files, and whether referenced files still exist.",
+    "3. Summarize completed work versus open work from the context below.",
+    "4. Propose the next highest-value step, then execute it.",
+    "5. Call out context drift before applying potentially stale assumptions.",
+    "",
+    "Repository validation checklist:",
+    "- Run `git status --short --branch` and report differences from the handoff context.",
+    "- Verify main files and commands in the handoff are still relevant.",
+    "- If context conflicts with current code, prefer current code and explain the delta.",
+    "",
+    "## Prior Session Context",
+    "",
+    input.resumeMarkdown.trim(),
+  ].join("\n");
+}
+
+function formatLaunchCommand(command: string, args: string[]): string {
+  const quoteArg = (arg: string): string => {
+    if (/^[A-Za-z0-9_./:@=-]+$/.test(arg)) {
+      return arg;
+    }
+    return JSON.stringify(arg);
+  };
+  return [command, ...args.map(quoteArg)].join(" ");
+}
+
+function launchAgentWithPrompt(
+  agent: HandoffAgent,
+  prompt: string,
+  extraArgs: string[],
+): { command: string; status: number; error?: string } {
+  const command = agent;
+  const args = [...extraArgs, prompt];
+  const launched = spawnSync(command, args, {
+    stdio: "inherit",
+  });
+
+  if (launched.error) {
+    return {
+      command: formatLaunchCommand(command, args),
+      status: 1,
+      error: launched.error.message,
+    };
+  }
+
+  return {
+    command: formatLaunchCommand(command, args),
+    status: launched.status ?? 1,
+  };
 }
 
 program
@@ -689,25 +770,6 @@ program
     );
   });
 
-const capture = program.command("capture").description("Capture session events (scaffold)");
-
-capture
-  .command("start")
-  .description("Start a session capture (not implemented yet)")
-  .option("--agent <name>", "Agent name (claude-code|codex|gemini)")
-  .option("--repo <path>", "Repository path")
-  .action(() => {
-    console.log("capture start is scaffolded but not implemented yet.");
-    console.log("Capture works today via integration hooks/sync commands.");
-  });
-
-capture
-  .command("stop")
-  .description("Stop current session capture (not implemented yet)")
-  .action(() => {
-    console.log("capture stop is scaffolded but not implemented yet.");
-  });
-
 program
   .command("summarize")
   .description("Generate and store a session capsule with intent/task breakdown")
@@ -882,6 +944,186 @@ program
             console.log(line);
           }
         }
+      }
+    },
+  );
+
+program
+  .command("handoff")
+  .description("Generate handoff context and start a coding agent with it")
+  .requiredOption("--agent <agent>", "Target agent (claude|codex)")
+  .option(
+    "--from <sessionRef>",
+    "Session id or latest (repeatable, default latest)",
+    collectOption,
+    [],
+  )
+  .option("--budget <tokens>", "Approximate token budget", "2000")
+  .option("--title <title>", "Optional resume pack title")
+  .option("--format <format>", "Output format when using --no-launch (markdown|json)", "markdown")
+  .option("--out <path>", "Write generated handoff payload to file")
+  .option(
+    "--agent-arg <arg>",
+    "Additional argument passed to the agent command (repeatable)",
+    collectOption,
+    [],
+  )
+  .option("--no-launch", "Generate handoff only; do not launch agent process")
+  .addHelpText(
+    "after",
+    [
+      "",
+      "What this command does:",
+      "- Builds a resume pack from selected sessions.",
+      "- Wraps it in a verify-state-first continuation prompt.",
+      "- Starts claude/codex with that prompt by default.",
+      "",
+      "Use --no-launch to print/write the handoff prompt without opening an agent session.",
+    ].join("\n"),
+  )
+  .option("--data-dir <path>", "Custom data directory")
+  .action(
+    (options: {
+      agent: string;
+      from: string[];
+      budget: string;
+      title?: string;
+      format: string;
+      out?: string;
+      agentArg: string[];
+      launch: boolean;
+      dataDir?: string;
+    }) => {
+      const agent = ensureHandoffAgent(options.agent);
+      if (!agent) {
+        console.error(`Invalid agent: ${options.agent}. Use claude or codex.`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const format = options.format.trim().toLowerCase();
+      if (format !== "markdown" && format !== "json") {
+        console.error(`Invalid format: ${options.format}. Use markdown or json.`);
+        process.exitCode = 1;
+        return;
+      }
+
+      initDatabase(options.dataDir);
+      const syncOutcomes = syncEnabledIntegrations(options.dataDir);
+      const suppressSyncOutput = format === "json" && !options.out && !options.launch;
+      if (!suppressSyncOutput) {
+        printSyncOutcomes(syncOutcomes);
+      }
+      enqueueAutoSummariesFromSync(syncOutcomes, options.dataDir, "auto_sync_pre_handoff");
+
+      const sessionRefs = options.from.length > 0 ? options.from : ["latest"];
+      const contexts = loadResumeSessionContexts(sessionRefs, options.dataDir);
+      if (contexts.length === 0) {
+        console.error("No sessions found for handoff.");
+        process.exitCode = 1;
+        return;
+      }
+
+      const budget = Number(options.budget);
+      if (!Number.isFinite(budget) || budget <= 0) {
+        console.error(`Invalid budget: ${options.budget}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const resume = buildResumePack(contexts, {
+        title: options.title,
+        tokenBudget: budget,
+      });
+
+      const saved = saveResumePack(
+        {
+          title: resume.title,
+          sourceSessionIds: resume.sourceSessionIds,
+          tokenBudget: budget,
+          contentMarkdown: resume.markdown,
+          metadata: {
+            estimatedTokens: resume.estimatedTokens,
+            sections: resume.sections,
+            sourceCount: contexts.length,
+            handoffTarget: agent,
+          },
+        },
+        options.dataDir,
+      );
+
+      const handoffPrompt = buildHandoffPrompt({
+        agent,
+        resumePackId: saved.id,
+        resumeTitle: resume.title,
+        sourceSessionIds: resume.sourceSessionIds,
+        estimatedTokens: resume.estimatedTokens,
+        resumeMarkdown: resume.markdown,
+      });
+
+      const payload =
+        format === "json"
+          ? JSON.stringify(
+              {
+                resumePackId: saved.id,
+                title: resume.title,
+                estimatedTokens: resume.estimatedTokens,
+                sourceSessionIds: resume.sourceSessionIds,
+                agent,
+                prompt: handoffPrompt,
+              },
+              null,
+              2,
+            )
+          : handoffPrompt;
+
+      if (options.out) {
+        writeFileSync(options.out, `${payload}\n`, "utf8");
+        console.log(`Handoff payload written: ${options.out}`);
+      }
+
+      if (!options.launch) {
+        if (!options.out) {
+          console.log(payload);
+        }
+        const suppressMetadata = format === "json" && !options.out;
+        if (!suppressMetadata) {
+          if (format !== "json") {
+            console.log("");
+          }
+          console.log(`Resume pack saved with id: ${saved.id}`);
+          console.log(`Sessions included: ${resume.sourceSessionIds.length}`);
+          console.log(`Target agent: ${agent}`);
+        }
+        return;
+      }
+
+      console.log(`Resume pack saved with id: ${saved.id}`);
+      console.log(`Target agent: ${agent}`);
+      console.log("Launching agent with handoff context...");
+
+      const launch = launchAgentWithPrompt(agent, handoffPrompt, options.agentArg);
+      console.log(`Launch command: ${launch.command}`);
+
+      if (launch.error) {
+        console.error(`Failed to launch ${agent}: ${launch.error}`);
+        if (!options.out) {
+          console.log("");
+          console.log("Generated handoff prompt:");
+          console.log(handoffPrompt);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      if (launch.status !== 0) {
+        console.error(`${agent} exited with status ${launch.status}.`);
+        if (!options.out) {
+          console.log("");
+          console.log("Generated handoff prompt:");
+          console.log(handoffPrompt);
+        }
+        process.exitCode = launch.status;
       }
     },
   );
