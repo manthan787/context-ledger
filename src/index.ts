@@ -823,7 +823,13 @@ program
         },
         options.dataDir,
       )
-        .filter((session) => !session.hasCapsule || session.intentLabel === null)
+        .filter(
+          (session) =>
+            !session.hasCapsule ||
+            session.intentLabel === null ||
+            (session.intentLabel === "other" &&
+              (session.intentConfidence ?? 0) <= 0.35),
+        )
         .sort((a, b) => (a.startedAt < b.startedAt ? -1 : 1));
 
       if (candidates.length === 0) {

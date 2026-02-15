@@ -11,20 +11,20 @@ const IntentSchema = z
   .catch("other");
 
 const SummaryOutputSchema = z.object({
-  summary: z.string(),
+  summary: z.string().default(""),
   keyOutcomes: z.array(z.string()).default([]),
   filesTouched: z.array(z.string()).default([]),
   commands: z.array(z.string()).default([]),
   errors: z.array(z.string()).default([]),
   todoItems: z.array(z.string()).default([]),
   primaryIntent: IntentSchema.default("other"),
-  intentConfidence: z.number().min(0).max(1).default(0.5),
+  intentConfidence: z.coerce.number().min(0).max(1).default(0.5),
   tasks: z
     .array(
       z.object({
         name: z.string(),
-        minutes: z.number().min(0),
-        confidence: z.number().min(0).max(1).default(0.6),
+        minutes: z.coerce.number().min(0),
+        confidence: z.coerce.number().min(0).max(1).default(0.6),
       }),
     )
     .default([]),
@@ -48,6 +48,116 @@ export interface GeneratedSummary {
 
 export interface GenerateSummaryOptions {
   includePromptSamples?: boolean;
+}
+
+function collectPromptSamples(source: SessionSummarySource, maxSamples = MAX_PROMPT_SAMPLES): string[] {
+  const promptSamples: string[] = [];
+  for (const event of source.events) {
+    const prompt = event.payload?.prompt;
+    if (typeof prompt === "string" && prompt.trim().length > 0) {
+      promptSamples.push(prompt.trim().slice(0, MAX_PROMPT_CHARS));
+      if (promptSamples.length >= maxSamples) {
+        break;
+      }
+    }
+  }
+  return promptSamples;
+}
+
+function inferIntentFromSignals(source: SessionSummarySource): {
+  intent: z.infer<typeof IntentSchema>;
+  confidence: number;
+} {
+  const promptText = collectPromptSamples(source, 12).join("\n").toLowerCase();
+  const toolNames = source.toolCalls.map((call) => call.toolName.toLowerCase());
+  const eventTypes = source.events.map((event) => event.eventType.toLowerCase());
+  const combinedSignals = `${promptText}\n${toolNames.join(" ")}\n${eventTypes.join(" ")}`;
+
+  const hasAny = (patterns: RegExp[]): boolean =>
+    patterns.some((pattern) => pattern.test(combinedSignals));
+
+  if (
+    hasAny([
+      /\bsql\b/,
+      /\bselect\b/,
+      /\bjoin\b/,
+      /\bmigration\b/,
+      /\bquery\b/,
+      /\bpostgres\b/,
+      /\bmysql\b/,
+      /\bschema\b/,
+    ])
+  ) {
+    return { intent: "sql", confidence: 0.72 };
+  }
+
+  if (
+    hasAny([
+      /\bdeploy\b/,
+      /\brelease\b/,
+      /\bproduction\b/,
+      /\bprod\b/,
+      /\bkubernetes\b/,
+      /\bk8s\b/,
+      /\bhelm\b/,
+      /\brollout\b/,
+    ])
+  ) {
+    return { intent: "deploy", confidence: 0.72 };
+  }
+
+  if (
+    hasAny([
+      /\bincident\b/,
+      /\boutage\b/,
+      /\balert\b/,
+      /\bpager\b/,
+      /\bsev[0-9]+\b/,
+      /\bon[-\s]?call\b/,
+      /\bbreak(ing|age)?\b/,
+    ])
+  ) {
+    return { intent: "incident", confidence: 0.74 };
+  }
+
+  if (
+    hasAny([
+      /\bdocumentation\b/,
+      /\bdocs?\b/,
+      /\breadme\b/,
+      /\badr\b/,
+      /\bwriteup\b/,
+    ])
+  ) {
+    return { intent: "docs", confidence: 0.68 };
+  }
+
+  const codingSignal =
+    source.toolCalls.length > 0 ||
+    hasAny([
+      /\bfix\b/,
+      /\brefactor\b/,
+      /\bimplement\b/,
+      /\bbuild\b/,
+      /\btest\b/,
+      /\bdebug\b/,
+      /\bbug\b/,
+      /\bcode\b/,
+      /\bfunction\b/,
+      /\bclass\b/,
+    ]) ||
+    eventTypes.some(
+      (value) =>
+        value.includes("tool_") ||
+        value === "request_sent" ||
+        value === "session_started",
+    );
+
+  if (codingSignal) {
+    return { intent: "coding", confidence: 0.66 };
+  }
+
+  return { intent: "other", confidence: 0.35 };
 }
 
 function normalizeBaseUrl(provider: SummarizerConfig["provider"], baseUrl?: string): string {
@@ -127,15 +237,7 @@ function buildPrompt(
 
   const promptSamples: string[] = [];
   if (includePromptSamples) {
-    for (const event of source.events) {
-      const prompt = event.payload?.prompt;
-      if (typeof prompt === "string" && prompt.trim().length > 0) {
-        promptSamples.push(prompt.trim().slice(0, MAX_PROMPT_CHARS));
-        if (promptSamples.length >= MAX_PROMPT_SAMPLES) {
-          break;
-        }
-      }
-    }
+    promptSamples.push(...collectPromptSamples(source));
   }
 
   const eventTypes = new Map<string, number>();
@@ -178,6 +280,7 @@ function buildPrompt(
     "",
     "Rules:",
     "- Infer intent from prompts + tools + session metadata.",
+    "- Prefer `coding`, `incident`, `deploy`, `sql`, or `docs` when there is evidence; use `other` only when evidence is sparse.",
     "- `tasks` should estimate where time went (minutes) and sum close to session duration.",
     "- Keep `filesTouched` to likely file paths only.",
     "- Keep outputs concise and factual.",
@@ -369,6 +472,7 @@ async function summarizeWithOllama(
 
 function buildFallbackSummary(source: SessionSummarySource): GeneratedSummary {
   const durationMinutes = getSessionDurationMinutes(source);
+  const inferredIntent = inferIntentFromSignals(source);
   const outcome = `Session ${source.session.id} contains ${source.events.length} events and ${source.toolCalls.length} tool calls.`;
   const summaryMarkdown = [
     "## Session Summary",
@@ -385,11 +489,11 @@ function buildFallbackSummary(source: SessionSummarySource): GeneratedSummary {
     commands: [],
     errors: [],
     todoItems: [],
-    primaryIntent: "other",
-    intentConfidence: 0.3,
+    primaryIntent: inferredIntent.intent,
+    intentConfidence: inferredIntent.confidence,
     tasks:
       durationMinutes > 0
-        ? [{ name: "general", minutes: durationMinutes, confidence: 0.3 }]
+        ? [{ name: inferredIntent.intent, minutes: durationMinutes, confidence: inferredIntent.confidence }]
         : [],
   };
 }
@@ -444,6 +548,18 @@ export async function generateSessionSummary(
           ]
         : [];
 
+  const inferredIntent = inferIntentFromSignals(source);
+  const shouldOverrideOtherIntent =
+    parsed.primaryIntent === "other" &&
+    inferredIntent.intent !== "other" &&
+    parsed.intentConfidence <= inferredIntent.confidence;
+  const primaryIntent = shouldOverrideOtherIntent
+    ? inferredIntent.intent
+    : parsed.primaryIntent;
+  const intentConfidence = shouldOverrideOtherIntent
+    ? inferredIntent.confidence
+    : parsed.intentConfidence;
+
   const keyOutcomes = trimList(parsed.keyOutcomes, 20);
   const filesTouched = trimList(parsed.filesTouched, 200);
   const commands = trimList(parsed.commands, 200);
@@ -453,13 +569,15 @@ export async function generateSessionSummary(
   const summaryMarkdown = [
     "## Session Summary",
     "",
-    parsed.summary.trim(),
+    parsed.summary.trim().length > 0
+      ? parsed.summary.trim()
+      : `Session ${source.session.id} processed successfully.`,
     "",
     "## Key Outcomes",
     ...(keyOutcomes.length > 0 ? keyOutcomes.map((item) => `- ${item}`) : ["- none"]),
     "",
     "## Primary Intent",
-    `- ${parsed.primaryIntent} (${parsed.intentConfidence.toFixed(2)})`,
+    `- ${primaryIntent} (${intentConfidence.toFixed(2)})`,
   ].join("\n");
 
   return {
@@ -469,8 +587,8 @@ export async function generateSessionSummary(
     commands,
     errors,
     todoItems: todos,
-    primaryIntent: parsed.primaryIntent,
-    intentConfidence: parsed.intentConfidence,
+    primaryIntent,
+    intentConfidence,
     tasks: normalizedTasks,
   };
 }
