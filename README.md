@@ -167,6 +167,15 @@ This stores:
 - `intent_labels` (primary intent + confidence)
 - `task_breakdowns` (estimated time split)
 
+Intent labels support granular paths. Examples:
+
+- `coding`
+- `coding/frontend`
+- `coding/frontend/design`
+- `research`
+- `research/tech-qna`
+- `sql`, `deploy`, `incident`, `docs`, `other`
+
 Automatic behavior:
 
 - Claude sessions auto-summarize on `Stop` (turn-level) and `SessionEnd` hook events.

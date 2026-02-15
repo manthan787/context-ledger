@@ -252,6 +252,93 @@ function inferredIntentLabelExprSql(): string {
           )
       )
       THEN 'sql'
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e3
+        WHERE e3.session_id = s.id
+          AND e3.event_type = 'request_sent'
+          AND e3.payload_json IS NOT NULL
+          AND (
+            LOWER(e3.payload_json) LIKE '% ui %'
+            OR LOWER(e3.payload_json) LIKE '%ux%'
+            OR LOWER(e3.payload_json) LIKE '%design%'
+            OR LOWER(e3.payload_json) LIKE '%redesign%'
+            OR LOWER(e3.payload_json) LIKE '%layout%'
+            OR LOWER(e3.payload_json) LIKE '%typography%'
+            OR LOWER(e3.payload_json) LIKE '%color palette%'
+            OR LOWER(e3.payload_json) LIKE '%figma%'
+            OR LOWER(e3.payload_json) LIKE '%wireframe%'
+            OR LOWER(e3.payload_json) LIKE '%mockup%'
+            OR LOWER(e3.payload_json) LIKE '%landing page%'
+            OR LOWER(e3.payload_json) LIKE '%design system%'
+          )
+      )
+      THEN 'coding/frontend/design'
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e3
+        WHERE e3.session_id = s.id
+          AND e3.event_type = 'request_sent'
+          AND e3.payload_json IS NOT NULL
+          AND (
+            LOWER(e3.payload_json) LIKE '%frontend%'
+            OR LOWER(e3.payload_json) LIKE '%front-end%'
+            OR LOWER(e3.payload_json) LIKE '%react%'
+            OR LOWER(e3.payload_json) LIKE '%next.js%'
+            OR LOWER(e3.payload_json) LIKE '%vue%'
+            OR LOWER(e3.payload_json) LIKE '%component%'
+            OR LOWER(e3.payload_json) LIKE '%css%'
+            OR LOWER(e3.payload_json) LIKE '%tailwind%'
+            OR LOWER(e3.payload_json) LIKE '%responsive%'
+            OR LOWER(e3.payload_json) LIKE '%html%'
+          )
+      )
+      THEN 'coding/frontend'
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e3
+        WHERE e3.session_id = s.id
+          AND e3.event_type = 'request_sent'
+          AND e3.payload_json IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM tool_calls tc3 WHERE tc3.session_id = s.id)
+          AND (
+            LOWER(e3.payload_json) LIKE '%what is%'
+            OR LOWER(e3.payload_json) LIKE '%how does%'
+            OR LOWER(e3.payload_json) LIKE '%why does%'
+            OR LOWER(e3.payload_json) LIKE '%when should%'
+            OR LOWER(e3.payload_json) LIKE '%difference between%'
+            OR LOWER(e3.payload_json) LIKE '%compare%'
+            OR LOWER(e3.payload_json) LIKE '%tradeoff%'
+            OR LOWER(e3.payload_json) LIKE '%trade-off%'
+            OR LOWER(e3.payload_json) LIKE '%pros and cons%'
+            OR LOWER(e3.payload_json) LIKE '%best practice%'
+            OR LOWER(e3.payload_json) LIKE '%explain%'
+            OR LOWER(e3.payload_json) LIKE '%clarify%'
+            OR LOWER(e3.payload_json) LIKE '%walk me through%'
+          )
+      )
+      THEN 'research/tech-qna'
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e3
+        WHERE e3.session_id = s.id
+          AND e3.event_type = 'request_sent'
+          AND e3.payload_json IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM tool_calls tc3 WHERE tc3.session_id = s.id)
+          AND (
+            LOWER(e3.payload_json) LIKE '%research%'
+            OR LOWER(e3.payload_json) LIKE '%investigate%'
+            OR LOWER(e3.payload_json) LIKE '%explore%'
+            OR LOWER(e3.payload_json) LIKE '%evaluate%'
+            OR LOWER(e3.payload_json) LIKE '%feasibility%'
+            OR LOWER(e3.payload_json) LIKE '%discovery%'
+            OR LOWER(e3.payload_json) LIKE '%spike%'
+            OR LOWER(e3.payload_json) LIKE '%options%'
+            OR LOWER(e3.payload_json) LIKE '%rfc%'
+            OR LOWER(e3.payload_json) LIKE '%architecture%'
+          )
+      )
+      THEN 'research'
       WHEN EXISTS(SELECT 1 FROM tool_calls tc3 WHERE tc3.session_id = s.id)
       THEN 'coding'
       WHEN s.status = 'active'
@@ -280,6 +367,93 @@ function inferredIntentConfidenceExprSql(): string {
           )
       )
       THEN 0.56
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e4
+        WHERE e4.session_id = s.id
+          AND e4.event_type = 'request_sent'
+          AND e4.payload_json IS NOT NULL
+          AND (
+            LOWER(e4.payload_json) LIKE '% ui %'
+            OR LOWER(e4.payload_json) LIKE '%ux%'
+            OR LOWER(e4.payload_json) LIKE '%design%'
+            OR LOWER(e4.payload_json) LIKE '%redesign%'
+            OR LOWER(e4.payload_json) LIKE '%layout%'
+            OR LOWER(e4.payload_json) LIKE '%typography%'
+            OR LOWER(e4.payload_json) LIKE '%color palette%'
+            OR LOWER(e4.payload_json) LIKE '%figma%'
+            OR LOWER(e4.payload_json) LIKE '%wireframe%'
+            OR LOWER(e4.payload_json) LIKE '%mockup%'
+            OR LOWER(e4.payload_json) LIKE '%landing page%'
+            OR LOWER(e4.payload_json) LIKE '%design system%'
+          )
+      )
+      THEN 0.63
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e4
+        WHERE e4.session_id = s.id
+          AND e4.event_type = 'request_sent'
+          AND e4.payload_json IS NOT NULL
+          AND (
+            LOWER(e4.payload_json) LIKE '%frontend%'
+            OR LOWER(e4.payload_json) LIKE '%front-end%'
+            OR LOWER(e4.payload_json) LIKE '%react%'
+            OR LOWER(e4.payload_json) LIKE '%next.js%'
+            OR LOWER(e4.payload_json) LIKE '%vue%'
+            OR LOWER(e4.payload_json) LIKE '%component%'
+            OR LOWER(e4.payload_json) LIKE '%css%'
+            OR LOWER(e4.payload_json) LIKE '%tailwind%'
+            OR LOWER(e4.payload_json) LIKE '%responsive%'
+            OR LOWER(e4.payload_json) LIKE '%html%'
+          )
+      )
+      THEN 0.58
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e4
+        WHERE e4.session_id = s.id
+          AND e4.event_type = 'request_sent'
+          AND e4.payload_json IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM tool_calls tc4 WHERE tc4.session_id = s.id)
+          AND (
+            LOWER(e4.payload_json) LIKE '%what is%'
+            OR LOWER(e4.payload_json) LIKE '%how does%'
+            OR LOWER(e4.payload_json) LIKE '%why does%'
+            OR LOWER(e4.payload_json) LIKE '%when should%'
+            OR LOWER(e4.payload_json) LIKE '%difference between%'
+            OR LOWER(e4.payload_json) LIKE '%compare%'
+            OR LOWER(e4.payload_json) LIKE '%tradeoff%'
+            OR LOWER(e4.payload_json) LIKE '%trade-off%'
+            OR LOWER(e4.payload_json) LIKE '%pros and cons%'
+            OR LOWER(e4.payload_json) LIKE '%best practice%'
+            OR LOWER(e4.payload_json) LIKE '%explain%'
+            OR LOWER(e4.payload_json) LIKE '%clarify%'
+            OR LOWER(e4.payload_json) LIKE '%walk me through%'
+          )
+      )
+      THEN 0.62
+      WHEN EXISTS(
+        SELECT 1
+        FROM events e4
+        WHERE e4.session_id = s.id
+          AND e4.event_type = 'request_sent'
+          AND e4.payload_json IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM tool_calls tc4 WHERE tc4.session_id = s.id)
+          AND (
+            LOWER(e4.payload_json) LIKE '%research%'
+            OR LOWER(e4.payload_json) LIKE '%investigate%'
+            OR LOWER(e4.payload_json) LIKE '%explore%'
+            OR LOWER(e4.payload_json) LIKE '%evaluate%'
+            OR LOWER(e4.payload_json) LIKE '%feasibility%'
+            OR LOWER(e4.payload_json) LIKE '%discovery%'
+            OR LOWER(e4.payload_json) LIKE '%spike%'
+            OR LOWER(e4.payload_json) LIKE '%options%'
+            OR LOWER(e4.payload_json) LIKE '%rfc%'
+            OR LOWER(e4.payload_json) LIKE '%architecture%'
+          )
+      )
+      THEN 0.57
       WHEN EXISTS(SELECT 1 FROM tool_calls tc4 WHERE tc4.session_id = s.id)
       THEN 0.5
       WHEN s.status = 'active'

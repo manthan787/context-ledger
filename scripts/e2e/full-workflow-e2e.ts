@@ -440,6 +440,90 @@ async function main(): Promise<void> {
       "Claude PreToolUse/PostToolUse pair should produce one tool call record.",
     );
 
+    const claudeDesignSessionId = "claude-design-e2e-session";
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "SessionStart",
+          session_id: claudeDesignSessionId,
+          cwd: workspaceDir,
+        }),
+      },
+    );
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "UserPromptSubmit",
+          session_id: claudeDesignSessionId,
+          cwd: workspaceDir,
+          prompt:
+            "Redesign the frontend dashboard UI. Improve layout, typography, color palette, spacing, and component styling with Tailwind.",
+        }),
+      },
+    );
+
+    const claudeResearchSessionId = "claude-research-e2e-session";
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "SessionStart",
+          session_id: claudeResearchSessionId,
+          cwd: workspaceDir,
+        }),
+      },
+    );
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "UserPromptSubmit",
+          session_id: claudeResearchSessionId,
+          cwd: workspaceDir,
+          prompt:
+            "What is the difference between Kafka and RabbitMQ, and when should I use each in production?",
+        }),
+      },
+    );
+
     mockServer = await startMockOpenAIServer();
     run(
       "node",
@@ -462,6 +546,86 @@ async function main(): Promise<void> {
       ],
       { cwd: rootDir },
     );
+
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "Stop",
+          session_id: claudeDesignSessionId,
+          cwd: workspaceDir,
+        }),
+      },
+    );
+
+    await waitForCondition(() => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const row = db
+          .prepare(
+            `
+              SELECT label
+              FROM intent_labels
+              WHERE session_id = ?
+              ORDER BY datetime(created_at) DESC
+              LIMIT 1
+            `,
+          )
+          .get(claudeDesignSessionId) as { label: string } | undefined;
+        return row?.label === "coding/frontend/design";
+      } finally {
+        db.close();
+      }
+    });
+
+    run(
+      "node",
+      [
+        distCli,
+        "internal-hook-ingest",
+        "--agent",
+        "claude",
+        "--data-dir",
+        dataDir,
+      ],
+      {
+        cwd: rootDir,
+        input: JSON.stringify({
+          hook_event_name: "Stop",
+          session_id: claudeResearchSessionId,
+          cwd: workspaceDir,
+        }),
+      },
+    );
+
+    await waitForCondition(() => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const row = db
+          .prepare(
+            `
+              SELECT label
+              FROM intent_labels
+              WHERE session_id = ?
+              ORDER BY datetime(created_at) DESC
+              LIMIT 1
+            `,
+          )
+          .get(claudeResearchSessionId) as { label: string } | undefined;
+        return row?.label === "research/tech-qna";
+      } finally {
+        db.close();
+      }
+    });
 
     run(
       "node",
@@ -575,6 +739,14 @@ async function main(): Promise<void> {
     assert(
       stats.byIntent.some((row) => row.label === "coding"),
       "Expected coding intent in stats output.",
+    );
+    assert(
+      stats.byIntent.some((row) => row.label === "coding/frontend/design"),
+      "Expected frontend design intent in stats output.",
+    );
+    assert(
+      stats.byIntent.some((row) => row.label === "research/tech-qna"),
+      "Expected research tech Q&A intent in stats output.",
     );
 
     const statsCodexRun = run(

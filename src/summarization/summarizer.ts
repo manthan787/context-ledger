@@ -7,7 +7,18 @@ const MAX_PROMPT_CHARS = 700;
 const REQUEST_TIMEOUT_MS = 45_000;
 
 const IntentSchema = z
-  .enum(["coding", "incident", "deploy", "sql", "docs", "other"])
+  .enum([
+    "coding",
+    "coding/frontend",
+    "coding/frontend/design",
+    "research",
+    "research/tech-qna",
+    "incident",
+    "deploy",
+    "sql",
+    "docs",
+    "other",
+  ])
   .catch("other");
 
 const SummaryOutputSchema = z.object({
@@ -95,8 +106,6 @@ function inferIntentFromSignals(source: SessionSummarySource): {
     hasAny([
       /\bdeploy\b/,
       /\brelease\b/,
-      /\bproduction\b/,
-      /\bprod\b/,
       /\bkubernetes\b/,
       /\bk8s\b/,
       /\bhelm\b/,
@@ -118,6 +127,93 @@ function inferIntentFromSignals(source: SessionSummarySource): {
     ])
   ) {
     return { intent: "incident", confidence: 0.74 };
+  }
+
+  if (
+    hasAny([
+      /\bui\b/,
+      /\bux\b/,
+      /\buser interface\b/,
+      /\bvisual design\b/,
+      /\bredesign\b/,
+      /\blayout\b/,
+      /\btypography\b/,
+      /\bcolor (palette|scheme|system)\b/,
+      /\bspacing\b/,
+      /\bwireframe\b/,
+      /\bmockup\b/,
+      /\bfigma\b/,
+      /\bhero section\b/,
+      /\blanding page\b/,
+      /\btheme\b/,
+      /\bdesign system\b/,
+    ])
+  ) {
+    return { intent: "coding/frontend/design", confidence: 0.79 };
+  }
+
+  if (
+    hasAny([
+      /\bfrontend\b/,
+      /\bfront-end\b/,
+      /\breact\b/,
+      /\bnext\.?js\b/,
+      /\bvue\b/,
+      /\bsvelte\b/,
+      /\bcomponent\b/,
+      /\bcss\b/,
+      /\bscss\b/,
+      /\btailwind\b/,
+      /\bhtml\b/,
+      /\bdom\b/,
+      /\bresponsive\b/,
+      /\banimation\b/,
+      /\baccessibility\b/,
+    ])
+  ) {
+    return { intent: "coding/frontend", confidence: 0.73 };
+  }
+
+  if (
+    source.toolCalls.length === 0 &&
+    (
+      /\?/.test(promptText) ||
+      hasAny([
+        /\bwhat is\b/,
+        /\bhow does\b/,
+        /\bwhy does\b/,
+        /\bwhen should\b/,
+        /\bdifference between\b/,
+        /\bcompare\b/,
+        /\bvs\.?\b/,
+        /\btrade[-\s]?offs?\b/,
+        /\bpros and cons\b/,
+        /\bbest practices?\b/,
+        /\bexplain\b/,
+        /\bclarify\b/,
+        /\bwalk me through\b/,
+      ])
+    )
+  ) {
+    return { intent: "research/tech-qna", confidence: 0.76 };
+  }
+
+  if (
+    source.toolCalls.length === 0 &&
+    hasAny([
+      /\bresearch\b/,
+      /\binvestigate\b/,
+      /\bexplore\b/,
+      /\bevaluate\b/,
+      /\bfeasibilit(y|ies)\b/,
+      /\bdiscovery\b/,
+      /\bspike\b/,
+      /\boptions?\b/,
+      /\brfc\b/,
+      /\barchitecture\b/,
+    ])
+  ) {
+    return { intent: "research", confidence: 0.69 };
   }
 
   if (
@@ -273,14 +369,17 @@ function buildPrompt(
     '  "commands": ["string"],',
     '  "errors": ["string"],',
     '  "todoItems": ["string"],',
-    '  "primaryIntent": "coding|incident|deploy|sql|docs|other",',
+    '  "primaryIntent": "coding|coding/frontend|coding/frontend/design|research|research/tech-qna|incident|deploy|sql|docs|other",',
     '  "intentConfidence": 0.0,',
     '  "tasks": [{"name":"string","minutes":0,"confidence":0.0}]',
     "}",
     "",
     "Rules:",
     "- Infer intent from prompts + tools + session metadata.",
-    "- Prefer `coding`, `incident`, `deploy`, `sql`, or `docs` when there is evidence; use `other` only when evidence is sparse.",
+    "- Use the most specific intent available when evidence supports it.",
+    "- For UI/UX/visual/layout work, use `coding/frontend/design` rather than plain `coding`.",
+    "- For exploratory technical questions or concept comparisons without execution, use `research/tech-qna`.",
+    "- Prefer `coding/frontend/design`, `coding/frontend`, `coding`, `research/tech-qna`, `research`, `incident`, `deploy`, `sql`, or `docs` when there is evidence; use `other` only when evidence is sparse.",
     "- `tasks` should estimate where time went (minutes) and sum close to session duration.",
     "- Keep `filesTouched` to likely file paths only.",
     "- Keep outputs concise and factual.",
@@ -555,16 +654,37 @@ export async function generateSessionSummary(
         : [];
 
   const inferredIntent = inferIntentFromSignals(source);
+  const intentSpecificity = (value: string): number =>
+    value.split("/").filter((part) => part.length > 0).length;
   const shouldOverrideOtherIntent =
     parsed.primaryIntent === "other" &&
     inferredIntent.intent !== "other" &&
     parsed.intentConfidence <= inferredIntent.confidence;
+  const shouldOverrideGenericCoding =
+    parsed.primaryIntent.startsWith("coding") &&
+    inferredIntent.intent.startsWith("coding") &&
+    parsed.primaryIntent !== inferredIntent.intent &&
+    intentSpecificity(inferredIntent.intent) > intentSpecificity(parsed.primaryIntent) &&
+    inferredIntent.confidence >= 0.72;
+  const shouldOverrideCodingToResearch =
+    parsed.primaryIntent === "coding" &&
+    inferredIntent.intent.startsWith("research") &&
+    source.toolCalls.length === 0 &&
+    inferredIntent.confidence >= 0.7;
   const primaryIntent = shouldOverrideOtherIntent
     ? inferredIntent.intent
-    : parsed.primaryIntent;
+    : shouldOverrideGenericCoding
+      ? inferredIntent.intent
+      : shouldOverrideCodingToResearch
+        ? inferredIntent.intent
+      : parsed.primaryIntent;
   const intentConfidence = shouldOverrideOtherIntent
     ? inferredIntent.confidence
-    : parsed.intentConfidence;
+    : shouldOverrideGenericCoding
+      ? inferredIntent.confidence
+      : shouldOverrideCodingToResearch
+        ? inferredIntent.confidence
+      : parsed.intentConfidence;
 
   const keyOutcomes = trimList(parsed.keyOutcomes, 20);
   const filesTouched = trimList(parsed.filesTouched, 200);
