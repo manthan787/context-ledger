@@ -2,8 +2,9 @@
 
 import { Command } from "commander";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { closeSync, existsSync, openSync, writeFileSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
+import { join, resolve } from "node:path";
 import {
   getConfigPathForDisplay,
   loadAppConfig,
@@ -176,6 +177,13 @@ interface StartDashboardRuntimeOptions {
   maxPortFallbackSteps?: number;
 }
 
+interface BackgroundDashboardLaunchResult {
+  requestedPort: number;
+  selectedPort: number;
+  pid: number | undefined;
+  logPath: string;
+}
+
 function enqueueAutoSummaries(
   sessionIds: string[],
   explicitDataDir: string | undefined,
@@ -232,6 +240,96 @@ function errorCode(error: unknown): string | undefined {
     return (error as { code: string }).code;
   }
   return undefined;
+}
+
+async function isPortAvailable(port: number): Promise<boolean> {
+  return await new Promise((resolveAvailable) => {
+    const server = createNetServer();
+    const onError = (): void => {
+      server.removeAllListeners();
+      resolveAvailable(false);
+    };
+    server.once("error", onError);
+    server.once("listening", () => {
+      server.close(() => resolveAvailable(true));
+    });
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+async function findAvailablePort(
+  startPort: number,
+  maxPortFallbackSteps = 20,
+): Promise<number> {
+  const maxAttempts = Math.max(0, maxPortFallbackSteps) + 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const candidate = startPort + attempt;
+    if (await isPortAvailable(candidate)) {
+      return candidate;
+    }
+  }
+  return startPort;
+}
+
+function resolveDashboardBackgroundInvocation(
+  port: number,
+  dataDir?: string,
+): { command: string; args: string[] } {
+  const baseArgs = ["dashboard", "--port", String(port)];
+  if (dataDir) {
+    baseArgs.push("--data-dir", dataDir);
+  }
+
+  try {
+    const cliEntrypoint = resolveHookCliEntrypointPath();
+    return {
+      command: process.execPath,
+      args: [cliEntrypoint, ...baseArgs],
+    };
+  } catch {
+    const tsxCliPath = resolve(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+    const srcEntrypoint = resolve(process.cwd(), "src", "index.ts");
+    if (existsSync(tsxCliPath) && existsSync(srcEntrypoint)) {
+      return {
+        command: process.execPath,
+        args: [tsxCliPath, srcEntrypoint, ...baseArgs],
+      };
+    }
+    throw new Error(
+      "Unable to resolve a dashboard launcher (tried compiled CLI and local tsx runtime).",
+    );
+  }
+}
+
+async function launchDashboardInBackground(input: {
+  requestedPort: number;
+  dataDir?: string;
+  maxPortFallbackSteps?: number;
+}): Promise<BackgroundDashboardLaunchResult> {
+  const selectedPort = await findAvailablePort(
+    input.requestedPort,
+    input.maxPortFallbackSteps ?? 20,
+  );
+  const invocation = resolveDashboardBackgroundInvocation(selectedPort, input.dataDir);
+  const logPath = join(getDataDir(input.dataDir), "dashboard.log");
+  const outFd = openSync(logPath, "a");
+
+  try {
+    const child = spawn(invocation.command, invocation.args, {
+      detached: true,
+      stdio: ["ignore", outFd, outFd],
+    });
+    child.unref();
+
+    return {
+      requestedPort: input.requestedPort,
+      selectedPort,
+      pid: child.pid,
+      logPath,
+    };
+  } finally {
+    closeSync(outFd);
+  }
 }
 
 function printSummarizerRecommendation(config: AppConfig): void {
@@ -903,14 +1001,30 @@ program
       }
 
       try {
-        await startDashboardRuntime({
-          port: requestedDashboardPort ?? 4173,
+        const launched = await launchDashboardInBackground({
+          requestedPort: requestedDashboardPort ?? 4173,
           dataDir: options.dataDir,
           maxPortFallbackSteps: 20,
         });
+        console.log("");
+        console.log(
+          `Dashboard launched in background at http://127.0.0.1:${launched.selectedPort}`,
+        );
+        if (launched.selectedPort !== launched.requestedPort) {
+          console.log(
+            `Requested port ${launched.requestedPort} was busy; using ${launched.selectedPort}.`,
+          );
+        }
+        if (typeof launched.pid === "number" && Number.isFinite(launched.pid)) {
+          console.log(`Dashboard PID: ${launched.pid}`);
+        }
+        console.log(`Dashboard log: ${launched.logPath}`);
+        console.log("Onboarding finished.");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error(`Failed to start dashboard after onboarding: ${message}`);
+        console.error(
+          `Failed to launch dashboard in background after onboarding: ${message}`,
+        );
         process.exitCode = 1;
       }
     },

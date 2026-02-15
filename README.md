@@ -38,7 +38,7 @@ ctx-ledger handoff --agent claude --from latest --no-launch --out ./handoff.md
 - turns prompt capture on
 - enables Claude + Codex integrations
 - runs initial sync
-- starts dashboard automatically (default port `4173`, auto-fallback if busy)
+- launches dashboard in the background (default port `4173`, auto-fallback if busy)
 
 ## Integrations
 
