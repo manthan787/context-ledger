@@ -155,7 +155,15 @@ type SyncOutcome = {
 
 const AUTO_SUMMARY_MAX_PER_SYNC = 4;
 const STATS_RANGE_VALUES = new Set(["24h", "7d", "30d", "all"]);
-const STATS_GROUP_VALUES = new Set(["intent", "tool", "agent", "day", "all"]);
+const STATS_GROUP_VALUES = new Set([
+  "intent",
+  "tool",
+  "agent",
+  "day",
+  "phase",
+  "project",
+  "all",
+]);
 const STATS_AGENT_VALUES = new Set(["claude", "claude-code", "codex", "gemini"]);
 type HandoffAgent = "claude" | "codex";
 
@@ -1251,7 +1259,11 @@ program
   .command("stats")
   .description("Show usage analytics and time breakdowns")
   .option("--range <range>", "Range filter (24h|7d|30d|all)", "7d")
-  .option("--group-by <group>", "Group view (intent|tool|agent|day|all)", "all")
+  .option(
+    "--group-by <group>",
+    "Group view (intent|tool|agent|day|phase|project|all)",
+    "all",
+  )
   .option(
     "--agent <agent>",
     "Agent filter (claude|codex|gemini); repeatable or comma-separated",
@@ -1283,7 +1295,7 @@ program
       const groupBy = options.groupBy.trim().toLowerCase();
       if (format === "table" && !STATS_GROUP_VALUES.has(groupBy)) {
         console.error(
-          `Invalid group-by: ${options.groupBy}. Use intent, tool, agent, day, or all.`,
+          `Invalid group-by: ${options.groupBy}. Use intent, tool, agent, day, phase, project, or all.`,
         );
         process.exitCode = 1;
         return;
@@ -1319,6 +1331,10 @@ program
       console.log(
         `Sessions: ${stats.summary.sessions} | Minutes: ${formatNumber(
           stats.summary.totalMinutes,
+        )} | Planning: ${formatNumber(
+          stats.summary.planningMinutes,
+        )} | Execution: ${formatNumber(
+          stats.summary.executionMinutes,
         )} | Events: ${stats.summary.events} | Tool Calls: ${stats.summary.toolCalls}`,
       );
       console.log("");
@@ -1372,6 +1388,32 @@ program
           ["Day", "Sessions", "Minutes"],
           stats.byDay.map((row) => [
             row.day,
+            String(row.sessions),
+            formatNumber(row.totalMinutes),
+          ]),
+        );
+        console.log("");
+      }
+
+      if (groupBy === "phase" || groupBy === "all") {
+        console.log("By Phase");
+        printTable(
+          ["Phase", "Minutes", "Share"],
+          stats.byPhase.map((row) => [
+            row.phase,
+            formatNumber(row.totalMinutes),
+            `${(row.share * 100).toFixed(1)}%`,
+          ]),
+        );
+        console.log("");
+      }
+
+      if (groupBy === "project" || groupBy === "all") {
+        console.log("By Project");
+        printTable(
+          ["Project", "Sessions", "Minutes"],
+          stats.byProject.map((row) => [
+            row.projectPath,
             String(row.sessions),
             formatNumber(row.totalMinutes),
           ]),

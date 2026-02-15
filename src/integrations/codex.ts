@@ -9,6 +9,7 @@ interface CodexHistoryEntry {
   session_id: string;
   ts: number;
   text: string;
+  repoPath?: string;
 }
 
 export interface EnableCodexOptions {
@@ -44,6 +45,22 @@ function normalizeHistoryPath(input?: string): string {
   return input && input.trim().length > 0 ? input.trim() : getDefaultHistoryPath();
 }
 
+function extractOptionalString(
+  source: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+  return undefined;
+}
+
 function parseHistoryLine(line: string): CodexHistoryEntry | null {
   if (line.trim().length === 0) {
     return null;
@@ -64,6 +81,15 @@ function parseHistoryLine(line: string): CodexHistoryEntry | null {
   const sessionId = typeof raw.session_id === "string" ? raw.session_id.trim() : "";
   const ts = typeof raw.ts === "number" ? raw.ts : Number(raw.ts);
   const text = typeof raw.text === "string" ? raw.text : "";
+  const repoPath = extractOptionalString(raw, [
+    "cwd",
+    "repo_path",
+    "repoPath",
+    "workspace",
+    "workspace_path",
+    "project_path",
+    "projectPath",
+  ]);
 
   if (sessionId.length === 0 || !Number.isFinite(ts) || text.trim().length === 0) {
     return null;
@@ -73,6 +99,7 @@ function parseHistoryLine(line: string): CodexHistoryEntry | null {
     session_id: sessionId,
     ts,
     text,
+    repoPath,
   };
 }
 
@@ -164,6 +191,7 @@ export function syncCodexHistory(options: SyncCodexOptions): SyncCodexResult {
         agent: "codex",
         eventType: "request_sent",
         timestamp: timestampIso,
+        repoPath: entry.repoPath,
         payload,
       },
       options.dataDir,

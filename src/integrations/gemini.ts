@@ -9,6 +9,7 @@ interface GeminiHistoryEntry {
   sessionId: string;
   timestampMs: number;
   prompt: string;
+  repoPath?: string;
 }
 
 export interface EnableGeminiOptions {
@@ -42,6 +43,22 @@ function getDefaultHistoryPath(): string {
 
 function normalizeHistoryPath(input?: string): string {
   return input && input.trim().length > 0 ? input.trim() : getDefaultHistoryPath();
+}
+
+function extractOptionalString(
+  source: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+  return undefined;
 }
 
 function normalizeTimestamp(raw: unknown): number | null {
@@ -99,6 +116,15 @@ function parseGeminiHistoryLine(line: string): GeminiHistoryEntry | null {
     normalizeTimestamp(raw.created_at) ??
     normalizeTimestamp(raw.createdAt) ??
     normalizeTimestamp(raw.time);
+  const repoPath = extractOptionalString(raw, [
+    "cwd",
+    "repo_path",
+    "repoPath",
+    "workspace",
+    "workspace_path",
+    "project_path",
+    "projectPath",
+  ]);
 
   if (sessionId.length === 0 || prompt.trim().length === 0 || timestampMs === null) {
     return null;
@@ -108,6 +134,7 @@ function parseGeminiHistoryLine(line: string): GeminiHistoryEntry | null {
     sessionId,
     timestampMs,
     prompt,
+    repoPath,
   };
 }
 
@@ -198,6 +225,7 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
         agent: "gemini",
         eventType: "request_sent",
         timestamp: new Date(entry.timestampMs).toISOString(),
+        repoPath: entry.repoPath,
         payload,
       },
       options.dataDir,

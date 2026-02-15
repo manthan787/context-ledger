@@ -132,6 +132,8 @@ ctx-ledger stats --range 7d
 ctx-ledger stats --range 30d --group-by tool
 ctx-ledger stats --range all --format json
 ctx-ledger stats --range all --group-by agent --agent claude
+ctx-ledger stats --range all --group-by phase
+ctx-ledger stats --range all --group-by project
 ```
 
 Supported groups:
@@ -140,7 +142,11 @@ Supported groups:
 - `tool`
 - `agent`
 - `day`
+- `phase` (planning vs execution)
+- `project` (working directory / repo path)
 - `all`
+
+`summary` now includes `planningMinutes` and `executionMinutes` alongside `totalMinutes`.
 
 Agent filter values:
 
@@ -211,6 +217,7 @@ Open:
 - `http://127.0.0.1:4173/`
 - API: `/api/stats`, `/api/sessions`, `/api/resume-packs`, `/healthz`
 - Optional API filter: `?agent=claude|codex|gemini` on `/api/stats` and `/api/sessions`
+- UI includes planning vs execution and project-time breakdowns, plus project path in recent sessions
 
 ## End-to-End Tests
 

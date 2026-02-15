@@ -223,6 +223,9 @@ async function main(): Promise<void> {
 
   const codexHistoryPath = join(workspaceDir, "codex-history.jsonl");
   const geminiHistoryPath = join(workspaceDir, "gemini-history.jsonl");
+  const codexProjectPath = join(workspaceDir, "apps", "checkout");
+  const codexProjectPathLatest = join(workspaceDir, "apps", "checkout-v2");
+  const geminiProjectPath = join(workspaceDir, "analytics");
   const dbPath = join(dataDir, "context-ledger.db");
   let mockServer: { port: number; close: () => Promise<void> } | null = null;
   let dashboardChild: ReturnType<typeof spawn> | null = null;
@@ -237,11 +240,13 @@ async function main(): Promise<void> {
           session_id: "codex-s1",
           ts: 1771000000,
           text: "Deploy checkout service using token sk-THIS_SHOULD_HIDE",
+          cwd: codexProjectPath,
         }),
         JSON.stringify({
           session_id: "codex-s1",
           ts: 1771000300,
           text: "Investigate alerts with email ops@example.com",
+          cwd: codexProjectPath,
         }),
       ].join("\n") + "\n",
       "utf8",
@@ -254,6 +259,7 @@ async function main(): Promise<void> {
           conversation_id: "gemini-c1",
           timestamp: 1771000600,
           prompt: "Write SQL for user growth trends",
+          cwd: geminiProjectPath,
         }),
       ].join("\n") + "\n",
       "utf8",
@@ -312,6 +318,7 @@ async function main(): Promise<void> {
       session_id: "codex-s1",
       ts: 1771000900,
       text: "Partial codex entry should be ingested only after line completion",
+      cwd: codexProjectPathLatest,
     });
     const splitIndex = Math.floor(partialCodexEntry.length / 2);
     writeFileSync(codexHistoryPath, partialCodexEntry.slice(0, splitIndex), {
@@ -528,12 +535,43 @@ async function main(): Promise<void> {
       { cwd: rootDir },
     );
     const stats = JSON.parse(statsRun.stdout) as {
-      summary: { sessions: number; totalMinutes: number };
+      summary: {
+        sessions: number;
+        totalMinutes: number;
+        planningMinutes: number;
+        executionMinutes: number;
+      };
       byIntent: Array<{ label: string }>;
       byTool: Array<{ toolName: string }>;
       byAgent: Array<{ agentKey: string }>;
+      byPhase: Array<{ phase: string }>;
+      byProject: Array<{ projectPath: string }>;
     };
     assert(stats.summary.sessions >= 3, "Expected at least 3 sessions in stats.");
+    assert(
+      stats.summary.planningMinutes >= 0 && stats.summary.executionMinutes >= 0,
+      "Expected planning/execution summary fields in stats output.",
+    );
+    assert(
+      Math.abs(
+        stats.summary.totalMinutes -
+          (stats.summary.planningMinutes + stats.summary.executionMinutes),
+      ) <= 0.05,
+      "Expected planning + execution minutes to match total minutes.",
+    );
+    assert(
+      stats.byPhase.some((row) => row.phase === "planning") &&
+        stats.byPhase.some((row) => row.phase === "execution"),
+      "Expected both planning and execution buckets.",
+    );
+    assert(
+      stats.byProject.some((row) => row.projectPath === workspaceDir),
+      "Expected Claude session project path in project breakdown.",
+    );
+    assert(
+      stats.byProject.some((row) => row.projectPath === codexProjectPathLatest),
+      "Expected latest codex project path in project breakdown.",
+    );
     assert(
       stats.byIntent.some((row) => row.label === "coding"),
       "Expected coding intent in stats output.",
@@ -560,11 +598,16 @@ async function main(): Promise<void> {
     const statsCodex = JSON.parse(statsCodexRun.stdout) as {
       summary: { sessions: number };
       byAgent: Array<{ agentKey: string }>;
+      byProject: Array<{ projectPath: string }>;
     };
     assert(statsCodex.summary.sessions >= 1, "Expected codex-filtered stats to include sessions.");
     assert(
       statsCodex.byAgent.every((row) => row.agentKey === "codex"),
       "Agent-filtered stats should only include codex rows.",
+    );
+    assert(
+      statsCodex.byProject.some((row) => row.projectPath === codexProjectPathLatest),
+      "Agent-filtered stats should include codex working directory.",
     );
 
     const resumeRun = run(
@@ -697,6 +740,7 @@ async function main(): Promise<void> {
     const filteredApiStats = (await filteredStatsRes.json()) as {
       summary?: { sessions?: number };
       byAgent?: Array<{ agentKey?: string }>;
+      byProject?: Array<{ projectPath?: string }>;
     };
     assert(
       (filteredApiStats.summary?.sessions ?? 0) >= 1,
@@ -705,6 +749,12 @@ async function main(): Promise<void> {
     assert(
       (filteredApiStats.byAgent ?? []).every((row) => row.agentKey === "codex"),
       "Dashboard filtered stats should only include codex agent rows.",
+    );
+    assert(
+      (filteredApiStats.byProject ?? []).some(
+        (row) => row.projectPath === codexProjectPathLatest,
+      ),
+      "Dashboard filtered stats should include codex project rows.",
     );
 
     console.log("E2E success: full workflow validated.");

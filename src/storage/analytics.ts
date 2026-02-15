@@ -7,6 +7,8 @@ export interface UsageStatsSummary {
   events: number;
   toolCalls: number;
   totalMinutes: number;
+  planningMinutes: number;
+  executionMinutes: number;
 }
 
 export interface UsageStatsIntentRow {
@@ -37,6 +39,18 @@ export interface UsageStatsDayRow {
   totalMinutes: number;
 }
 
+export interface UsageStatsPhaseRow {
+  phase: "planning" | "execution";
+  totalMinutes: number;
+  share: number;
+}
+
+export interface UsageStatsProjectRow {
+  projectPath: string;
+  sessions: number;
+  totalMinutes: number;
+}
+
 export interface UsageStatsResult {
   rangeLabel: string;
   sinceIso: string | null;
@@ -45,6 +59,8 @@ export interface UsageStatsResult {
   byTool: UsageStatsToolRow[];
   byAgent: UsageStatsAgentRow[];
   byDay: UsageStatsDayRow[];
+  byPhase: UsageStatsPhaseRow[];
+  byProject: UsageStatsProjectRow[];
 }
 
 export interface SessionListItem {
@@ -430,6 +446,101 @@ function groupBy<T>(
   return map;
 }
 
+const UNKNOWN_PROJECT_LABEL = "(unknown)";
+
+function getExecutionMinutesBySession(
+  db: Database.Database,
+  eventWhereSql: string,
+  eventParams: unknown[],
+): Map<string, number> {
+  const phaseWhereSql = eventWhereSql.length > 0
+    ? `${eventWhereSql} AND event_type IN ('tool_pre_use', 'tool_post_use')`
+    : "WHERE event_type IN ('tool_pre_use', 'tool_post_use')";
+  const phaseRows = db
+    .prepare(
+      `
+        SELECT
+          e.session_id as sessionId,
+          e.event_type as eventType,
+          e.timestamp as timestamp
+        FROM events e
+        ${phaseWhereSql}
+        ORDER BY e.session_id ASC, datetime(e.timestamp) ASC, e.id ASC
+      `,
+    )
+    .all(...eventParams) as Array<{
+    sessionId: string;
+    eventType: string;
+    timestamp: string;
+  }>;
+
+  const executionMsBySession = new Map<string, number>();
+  const openToolStarts = new Map<string, number[]>();
+
+  for (const row of phaseRows) {
+    const timestampMs = Date.parse(row.timestamp);
+    if (!Number.isFinite(timestampMs)) {
+      continue;
+    }
+
+    if (row.eventType === "tool_pre_use") {
+      const stack = openToolStarts.get(row.sessionId);
+      if (stack) {
+        stack.push(timestampMs);
+      } else {
+        openToolStarts.set(row.sessionId, [timestampMs]);
+      }
+      continue;
+    }
+
+    const stack = openToolStarts.get(row.sessionId);
+    if (!stack || stack.length === 0) {
+      continue;
+    }
+
+    const startMs = stack.pop();
+    if (typeof startMs !== "number" || timestampMs <= startMs) {
+      continue;
+    }
+
+    const prev = executionMsBySession.get(row.sessionId) ?? 0;
+    executionMsBySession.set(row.sessionId, prev + (timestampMs - startMs));
+  }
+
+  const toolDurationRows = db
+    .prepare(
+      `
+        SELECT
+          tc.session_id as sessionId,
+          SUM(COALESCE(tc.duration_ms, 0)) as totalDurationMs
+        FROM tool_calls tc
+        ${eventWhereSql}
+        GROUP BY tc.session_id
+      `,
+    )
+    .all(...eventParams) as Array<{
+    sessionId: string;
+    totalDurationMs: number | null;
+  }>;
+
+  for (const row of toolDurationRows) {
+    const durationMs = Number(row.totalDurationMs ?? 0);
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      continue;
+    }
+    const existing = executionMsBySession.get(row.sessionId) ?? 0;
+    if (durationMs > existing) {
+      executionMsBySession.set(row.sessionId, durationMs);
+    }
+  }
+
+  const executionMinutesBySession = new Map<string, number>();
+  for (const [sessionId, durationMs] of executionMsBySession.entries()) {
+    executionMinutesBySession.set(sessionId, durationMs / (1000 * 60));
+  }
+  return executionMinutesBySession;
+}
+
 export function getUsageStats(
   rangeLabel: string,
   sinceIso: string | null,
@@ -455,14 +566,38 @@ export function getUsageStats(
     const toolCallsRow = db
       .prepare(`SELECT COUNT(*) as value FROM tool_calls ${eventWhereSql}`)
       .get(...eventParams) as { value: number };
+    const executionMinutesBySession = getExecutionMinutesBySession(
+      db,
+      eventWhereSql,
+      eventParams,
+    );
+
+    let totalMinutesRaw = 0;
+    let executionMinutesRaw = 0;
+    let planningMinutesRaw = 0;
+    for (const session of sessions) {
+      const sessionMinutes = Math.max(0, session.durationMinutes);
+      const executionMinutes = Math.max(
+        0,
+        Math.min(
+          sessionMinutes,
+          executionMinutesBySession.get(session.id) ?? 0,
+        ),
+      );
+      const planningMinutes = Math.max(0, sessionMinutes - executionMinutes);
+
+      totalMinutesRaw += sessionMinutes;
+      executionMinutesRaw += executionMinutes;
+      planningMinutesRaw += planningMinutes;
+    }
 
     const summary: UsageStatsSummary = {
       sessions: sessions.length,
       events: eventsRow.value,
       toolCalls: toolCallsRow.value,
-      totalMinutes: Number(
-        sessions.reduce((acc, row) => acc + row.durationMinutes, 0).toFixed(2),
-      ),
+      totalMinutes: Number(totalMinutesRaw.toFixed(2)),
+      planningMinutes: Number(planningMinutesRaw.toFixed(2)),
+      executionMinutes: Number(executionMinutesRaw.toFixed(2)),
     };
 
     const byIntentMap = groupBy(
@@ -524,6 +659,47 @@ export function getUsageStats(
       }))
       .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
 
+    const byPhase: UsageStatsPhaseRow[] = [
+      {
+        phase: "planning",
+        totalMinutes: summary.planningMinutes,
+        share:
+          summary.totalMinutes > 0
+            ? Number((summary.planningMinutes / summary.totalMinutes).toFixed(3))
+            : 0,
+      },
+      {
+        phase: "execution",
+        totalMinutes: summary.executionMinutes,
+        share:
+          summary.totalMinutes > 0
+            ? Number((summary.executionMinutes / summary.totalMinutes).toFixed(3))
+            : 0,
+      },
+    ];
+
+    const byProjectMap = groupBy(sessions, (row) => {
+      const repoPath = row.repoPath?.trim();
+      return repoPath && repoPath.length > 0 ? repoPath : UNKNOWN_PROJECT_LABEL;
+    });
+    const byProject: UsageStatsProjectRow[] = [...byProjectMap.entries()]
+      .map(([projectPath, rows]) => ({
+        projectPath,
+        sessions: rows.length,
+        totalMinutes: Number(
+          rows.reduce((acc, row) => acc + row.durationMinutes, 0).toFixed(2),
+        ),
+      }))
+      .sort((a, b) => {
+        if (b.totalMinutes !== a.totalMinutes) {
+          return b.totalMinutes - a.totalMinutes;
+        }
+        if (b.sessions !== a.sessions) {
+          return b.sessions - a.sessions;
+        }
+        return a.projectPath.localeCompare(b.projectPath);
+      });
+
     const toolRows = db
       .prepare(
         `
@@ -560,6 +736,8 @@ export function getUsageStats(
       byTool,
       byAgent,
       byDay,
+      byPhase,
+      byProject,
     };
   } finally {
     db.close();

@@ -252,6 +252,14 @@ function safeJson(value: unknown): string | null {
   }
 }
 
+function normalizeOptionalText(value: string | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function parseJsonObject(raw: string | null): Record<string, unknown> | null {
   if (!raw) {
     return null;
@@ -275,6 +283,8 @@ export function recordEvent(
   const db = openWritableDatabase(explicitDataDir);
   const timestamp = input.timestamp ?? new Date().toISOString();
   const eventId = randomUUID();
+  const normalizedRepoPath = normalizeOptionalText(input.repoPath);
+  const normalizedBranch = normalizeOptionalText(input.branch);
 
   const tx = db.transaction(() => {
     const existingSession = db
@@ -299,8 +309,8 @@ export function recordEvent(
         input.sessionId,
         input.provider,
         input.agent,
-        input.repoPath ?? null,
-        input.branch ?? null,
+        normalizedRepoPath,
+        normalizedBranch,
         timestamp,
         input.sessionStatus ?? "active",
       );
@@ -309,12 +319,18 @@ export function recordEvent(
         `
           UPDATE sessions
           SET
-            repo_path = COALESCE(repo_path, ?),
-            branch = COALESCE(branch, ?),
+            repo_path = CASE WHEN ? IS NOT NULL THEN ? ELSE repo_path END,
+            branch = CASE WHEN ? IS NOT NULL THEN ? ELSE branch END,
             updated_at = datetime('now')
           WHERE id = ?
         `,
-      ).run(input.repoPath ?? null, input.branch ?? null, input.sessionId);
+      ).run(
+        normalizedRepoPath,
+        normalizedRepoPath,
+        normalizedBranch,
+        normalizedBranch,
+        input.sessionId,
+      );
     }
 
     db.prepare(

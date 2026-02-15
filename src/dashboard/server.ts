@@ -115,6 +115,18 @@ function dashboardHtml(): string {
       height: 100%;
       background: var(--accent);
     }
+    .project-chip {
+      display: inline-block;
+      max-width: 280px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: #f1f5f9;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 12px;
+    }
     table {
       border-collapse: collapse;
       width: 100%;
@@ -182,9 +194,20 @@ function dashboardHtml(): string {
 
     <div class="row">
       <div class="panel">
+        <h3 style="margin:0 0 8px">Planning Vs Execution</h3>
+        <div id="phase"></div>
+      </div>
+      <div class="panel">
+        <h3 style="margin:0 0 8px">Time By Project</h3>
+        <div id="projects"></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="panel">
         <h3 style="margin:0 0 8px">Recent Sessions</h3>
         <table id="sessions-table">
-          <thead><tr><th>ID</th><th>Agent</th><th>Intent</th><th>Minutes</th><th>Started</th></tr></thead>
+          <thead><tr><th>ID</th><th>Agent</th><th>Project</th><th>Intent</th><th>Minutes</th><th>Started</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -200,6 +223,16 @@ function dashboardHtml(): string {
 
   <script>
     function fmt(value) { return Number(value).toLocaleString(); }
+
+    function projectLabel(path) {
+      if (!path || path === "(unknown)") return "(unknown)";
+      const normalized = String(path);
+      const parts = normalized.split(/[\\\\/]/).filter(Boolean);
+      if (parts.length >= 2) {
+        return parts.slice(-2).join("/");
+      }
+      return normalized;
+    }
 
     function renderKpis(summary) {
       const el = document.getElementById("kpis");
@@ -246,12 +279,51 @@ function dashboardHtml(): string {
       \`).join("");
     }
 
+    function renderPhase(rows) {
+      const el = document.getElementById("phase");
+      const view = rows || [];
+      if (view.length === 0) {
+        el.innerHTML = '<div class="muted">No phase data</div>';
+        return;
+      }
+      const max = Math.max(...view.map((r) => r.totalMinutes), 1);
+      el.innerHTML = view.map((row) => \`
+        <div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;gap:8px">
+            <div>\${row.phase}</div>
+            <div class="muted">\${row.totalMinutes.toFixed(1)} min (\${(row.share * 100).toFixed(0)}%)</div>
+          </div>
+          <div class="bar"><span style="width:\${(row.totalMinutes / max) * 100}%;background:\${row.phase === "execution" ? "#16a34a" : "#6366f1"}"></span></div>
+        </div>
+      \`).join("");
+    }
+
+    function renderProjects(rows) {
+      const el = document.getElementById("projects");
+      const view = (rows || []).slice(0, 12);
+      if (view.length === 0) {
+        el.innerHTML = '<div class="muted">No project data</div>';
+        return;
+      }
+      const max = Math.max(...view.map((r) => r.totalMinutes), 1);
+      el.innerHTML = view.map((row) => \`
+        <div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;gap:8px">
+            <div><span class="project-chip" title="\${row.projectPath}">\${projectLabel(row.projectPath)}</span></div>
+            <div class="muted">\${row.totalMinutes.toFixed(1)} min (\${row.sessions} sessions)</div>
+          </div>
+          <div class="bar"><span style="width:\${(row.totalMinutes / max) * 100}%;background:#0ea5e9"></span></div>
+        </div>
+      \`).join("");
+    }
+
     function renderSessions(rows) {
       const tbody = document.querySelector("#sessions-table tbody");
       tbody.innerHTML = rows.slice(0, 30).map((row) => \`
         <tr>
           <td><code>\${row.id}</code></td>
           <td>\${row.agentDisplay || row.agent}</td>
+          <td><span class="project-chip" title="\${row.repoPath || "(unknown)"}">\${projectLabel(row.repoPath || "(unknown)")}</span></td>
           <td>\${row.intentLabel || "unlabeled"}</td>
           <td>\${row.durationMinutes.toFixed(1)}</td>
           <td>\${row.startedAt}</td>
@@ -281,6 +353,8 @@ function dashboardHtml(): string {
       renderKpis(stats.summary);
       renderIntent(stats.byIntent);
       renderTools(stats.byTool);
+      renderPhase(stats.byPhase);
+      renderProjects(stats.byProject);
 
       const sessionsRes = await fetch('/api/sessions?limit=40&range=' + encodeURIComponent(range) + agentQuery);
       const sessions = await sessionsRes.json();
