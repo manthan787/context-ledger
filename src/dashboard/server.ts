@@ -45,7 +45,7 @@ function parseAgentFilter(input: string | null): string[] {
     const entry = value.trim();
     if (entry === "claude" || entry === "claude-code") {
       out.add("claude");
-    } else if (entry === "codex" || entry === "gemini") {
+    } else if (entry === "codex") {
       out.add(entry);
     }
   }
@@ -386,7 +386,6 @@ function dashboardHtml(): string {
           <option value="all" selected>all</option>
           <option value="claude">claude</option>
           <option value="codex">codex</option>
-          <option value="gemini">gemini</option>
         </select>
         <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
           <svg id="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
@@ -581,12 +580,6 @@ function dashboardHtml(): string {
           + '<div class="session-detail" id="detail-' + esc(row.id) + '"></div>'
           + '</div>';
       }).join("");
-
-      el.addEventListener("click", function(e) {
-        var card = e.target.closest(".session-card");
-        if (!card) return;
-        toggleSessionDetail(card);
-      });
     }
 
     function toggleSessionDetail(card) {
@@ -704,13 +697,43 @@ function dashboardHtml(): string {
 
     var rangeEl = document.getElementById("range");
     var agentEl = document.getElementById("agent");
-    var reload = function() { return load(rangeEl.value, agentEl.value); };
-    rangeEl.addEventListener("change", reload);
-    agentEl.addEventListener("change", reload);
-    reload().catch(function(err) {
-      console.error(err);
-      alert("Failed to load dashboard data. Check terminal logs.");
+    var sessionsEl = document.getElementById("sessions-list");
+    sessionsEl.addEventListener("click", function(e) {
+      var card = e.target.closest(".session-card");
+      if (!card) return;
+      toggleSessionDetail(card);
     });
+
+    var loading = false;
+    var hasShownError = false;
+    var reload = async function(silent) {
+      if (loading) return;
+      loading = true;
+      try {
+        await load(rangeEl.value, agentEl.value);
+        hasShownError = false;
+      } catch (err) {
+        console.error(err);
+        if (!silent && !hasShownError) {
+          hasShownError = true;
+          alert("Failed to load dashboard data. Check terminal logs.");
+        }
+      } finally {
+        loading = false;
+      }
+    };
+
+    rangeEl.addEventListener("change", function() {
+      reload(false);
+    });
+    agentEl.addEventListener("change", function() {
+      reload(false);
+    });
+
+    reload(false);
+    setInterval(function() {
+      reload(true);
+    }, 3000);
   </script>
 </body>
 </html>`;

@@ -26,8 +26,20 @@ export interface HistoryIntegrationConfig {
   cursor: number;
 }
 
+export interface CodexSessionFileStateConfig {
+  sessionId?: string;
+  repoPath?: string;
+  branch?: string;
+}
+
+export interface CodexIntegrationConfig extends HistoryIntegrationConfig {
+  sessionsPath?: string;
+  sessionFileCursors?: Record<string, number>;
+  sessionFileState?: Record<string, CodexSessionFileStateConfig>;
+}
+
 export interface IntegrationsConfig {
-  codex?: HistoryIntegrationConfig;
+  codex?: CodexIntegrationConfig;
   gemini?: HistoryIntegrationConfig;
 }
 
@@ -108,6 +120,84 @@ function normalizeIntegrationConfig(input: unknown): HistoryIntegrationConfig | 
   };
 }
 
+function normalizeSessionFileCursors(input: unknown): Record<string, number> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof key !== "string" || key.trim().length === 0) {
+      continue;
+    }
+    const cursor =
+      typeof value === "number" && Number.isFinite(value) && value >= 0
+        ? Math.floor(value)
+        : null;
+    if (cursor !== null) {
+      out[key] = cursor;
+    }
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeCodexIntegrationConfig(input: unknown): CodexIntegrationConfig | undefined {
+  const base = normalizeIntegrationConfig(input);
+  if (!base) {
+    return undefined;
+  }
+
+  const candidate =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+  const sessionsPath =
+    typeof candidate.sessionsPath === "string" && candidate.sessionsPath.trim().length > 0
+      ? candidate.sessionsPath.trim()
+      : undefined;
+  const sessionFileCursors = normalizeSessionFileCursors(candidate.sessionFileCursors);
+  const sessionFileState: Record<string, CodexSessionFileStateConfig> = {};
+  if (
+    candidate.sessionFileState &&
+    typeof candidate.sessionFileState === "object" &&
+    !Array.isArray(candidate.sessionFileState)
+  ) {
+    for (const [filePath, raw] of Object.entries(
+      candidate.sessionFileState as Record<string, unknown>,
+    )) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const state = raw as Record<string, unknown>;
+      const sessionId =
+        typeof state.sessionId === "string" && state.sessionId.trim().length > 0
+          ? state.sessionId.trim()
+          : undefined;
+      const repoPath =
+        typeof state.repoPath === "string" && state.repoPath.trim().length > 0
+          ? state.repoPath.trim()
+          : undefined;
+      const branch =
+        typeof state.branch === "string" && state.branch.trim().length > 0
+          ? state.branch.trim()
+          : undefined;
+      if (!sessionId && !repoPath && !branch) {
+        continue;
+      }
+      sessionFileState[filePath] = { sessionId, repoPath, branch };
+    }
+  }
+
+  return {
+    ...base,
+    sessionsPath,
+    sessionFileCursors,
+    sessionFileState:
+      Object.keys(sessionFileState).length > 0 ? sessionFileState : undefined,
+  };
+}
+
 function normalizeConfig(input: unknown): AppConfig {
   const defaults: AppConfig = {
     version: CURRENT_CONFIG_VERSION,
@@ -153,7 +243,7 @@ function normalizeConfig(input: unknown): AppConfig {
       ? (raw.integrations as Record<string, unknown>)
       : null;
 
-  const codex = normalizeIntegrationConfig(integrationsRaw?.codex);
+  const codex = normalizeCodexIntegrationConfig(integrationsRaw?.codex);
   const gemini = normalizeIntegrationConfig(integrationsRaw?.gemini);
 
   const normalized: AppConfig = {

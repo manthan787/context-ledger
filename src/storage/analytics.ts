@@ -244,11 +244,12 @@ function inferredIntentLabelExprSql(): string {
           AND e3.payload_json IS NOT NULL
           AND (
             LOWER(e3.payload_json) LIKE '%sql%'
-            OR LOWER(e3.payload_json) LIKE '%query%'
+            OR LOWER(e3.payload_json) LIKE '%sql query%'
             OR LOWER(e3.payload_json) LIKE '%select%'
             OR LOWER(e3.payload_json) LIKE '%join%'
             OR LOWER(e3.payload_json) LIKE '%postgres%'
             OR LOWER(e3.payload_json) LIKE '%mysql%'
+            OR LOWER(e3.payload_json) LIKE '%sqlite%'
           )
       )
       THEN 'sql'
@@ -359,11 +360,12 @@ function inferredIntentConfidenceExprSql(): string {
           AND e4.payload_json IS NOT NULL
           AND (
             LOWER(e4.payload_json) LIKE '%sql%'
-            OR LOWER(e4.payload_json) LIKE '%query%'
+            OR LOWER(e4.payload_json) LIKE '%sql query%'
             OR LOWER(e4.payload_json) LIKE '%select%'
             OR LOWER(e4.payload_json) LIKE '%join%'
             OR LOWER(e4.payload_json) LIKE '%postgres%'
             OR LOWER(e4.payload_json) LIKE '%mysql%'
+            OR LOWER(e4.payload_json) LIKE '%sqlite%'
           )
       )
       THEN 0.56

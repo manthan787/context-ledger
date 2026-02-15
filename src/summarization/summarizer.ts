@@ -92,11 +92,10 @@ function inferIntentFromSignals(source: SessionSummarySource): {
       /\bsql\b/,
       /\bselect\b/,
       /\bjoin\b/,
-      /\bmigration\b/,
-      /\bquery\b/,
-      /\bpostgres\b/,
+      /\bsql query\b/,
+      /\bpostgres(?:ql)?\b/,
       /\bmysql\b/,
-      /\bschema\b/,
+      /\bsqlite\b/,
     ])
   ) {
     return { intent: "sql", confidence: 0.72 };

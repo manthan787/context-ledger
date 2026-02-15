@@ -1,6 +1,13 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -88,6 +95,22 @@ async function waitForCondition(
   throw new Error("Timed out waiting for condition.");
 }
 
+async function waitForConditionAsync(
+  check: () => Promise<boolean>,
+  options?: { timeoutMs?: number; intervalMs?: number },
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? 20_000;
+  const intervalMs = options?.intervalMs ?? 300;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await check()) {
+      return;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
+  }
+  throw new Error("Timed out waiting for async condition.");
+}
+
 function assert(condition: unknown, message: string): void {
   if (!condition) {
     throw new Error(message);
@@ -101,9 +124,10 @@ function countCodexRequestEvents(dbPath: string): number {
       .prepare(
         `
           SELECT COUNT(*) as value
-          FROM events
-          WHERE event_type = 'request_sent'
-            AND payload_json LIKE '%codex_history_jsonl%'
+          FROM events e
+          INNER JOIN sessions s ON s.id = e.session_id
+          WHERE e.event_type = 'request_sent'
+            AND LOWER(s.agent) = 'codex'
         `,
       )
       .get() as { value: number };
@@ -222,10 +246,20 @@ async function main(): Promise<void> {
   const shouldCleanupData = !args.dataDir && !args.keepArtifacts;
 
   const codexHistoryPath = join(workspaceDir, "codex-history.jsonl");
+  const codexSessionsPath = join(workspaceDir, "codex-sessions");
   const geminiHistoryPath = join(workspaceDir, "gemini-history.jsonl");
   const codexProjectPath = join(workspaceDir, "apps", "checkout");
   const codexProjectPathLatest = join(workspaceDir, "apps", "checkout-v2");
   const geminiProjectPath = join(workspaceDir, "analytics");
+  const codexRolloutSessionRaw = "019c470b-3e61-7bd0-892d-b3fa345edb18";
+  const codexRolloutSessionId = `codex-${codexRolloutSessionRaw}`;
+  const codexRolloutFile = join(
+    codexSessionsPath,
+    "2026",
+    "02",
+    "14",
+    `rollout-2026-02-14T09-00-00-${codexRolloutSessionRaw}.jsonl`,
+  );
   const dbPath = join(dataDir, "context-ledger.db");
   let mockServer: { port: number; close: () => Promise<void> } | null = null;
   let dashboardChild: ReturnType<typeof spawn> | null = null;
@@ -233,20 +267,83 @@ async function main(): Promise<void> {
   try {
     run("npm", ["run", "build"], { cwd: rootDir });
 
+    mkdirSync(dirname(codexRolloutFile), { recursive: true });
     writeFileSync(
-      codexHistoryPath,
+      codexRolloutFile,
       [
         JSON.stringify({
-          session_id: "codex-s1",
-          ts: 1771000000,
-          text: "Deploy checkout service using token sk-THIS_SHOULD_HIDE",
-          cwd: codexProjectPath,
+          timestamp: "2026-02-14T09:00:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: codexRolloutSessionRaw,
+            timestamp: "2026-02-14T09:00:00.000Z",
+            cwd: codexProjectPath,
+            model_provider: "openai",
+            originator: "Codex Desktop",
+            source: "vscode",
+            cli_version: "0.100.0-alpha.10",
+            git: {
+              branch: "main",
+            },
+          },
         }),
         JSON.stringify({
-          session_id: "codex-s1",
-          ts: 1771000300,
-          text: "Investigate alerts with email ops@example.com",
-          cwd: codexProjectPath,
+          timestamp: "2026-02-14T09:00:05.000Z",
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Deploy checkout service using token sk-THIS_SHOULD_HIDE",
+            images: [],
+            local_images: [],
+            text_elements: [],
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-14T09:00:07.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "call-codex-e2e-1",
+            arguments: JSON.stringify({ cmd: "npm run deploy" }),
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-14T09:00:08.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call-codex-e2e-1",
+            output:
+              "Chunk ID: codex-e2e\\nProcess exited with code 0\\nOutput:\\ndeploy ok\\n",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-14T09:00:09.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "codex-turn-1",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-14T09:01:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Investigate alerts with email ops@example.com",
+            images: [],
+            local_images: [],
+            text_elements: [],
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-14T09:01:12.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "codex-turn-2",
+          },
         }),
       ].join("\n") + "\n",
       "utf8",
@@ -291,6 +388,8 @@ async function main(): Promise<void> {
         "codex",
         "--history-path",
         codexHistoryPath,
+        "--sessions-path",
+        codexSessionsPath,
         "--data-dir",
         dataDir,
       ],
@@ -313,15 +412,44 @@ async function main(): Promise<void> {
 
     const initialCodexCount = countCodexRequestEvents(dbPath);
     assert(initialCodexCount === 2, "Initial codex sync should ingest two request events.");
+    assert(
+      countToolCallsForSession(dbPath, codexRolloutSessionId, "exec_command") >= 1,
+      "Codex rollout sync should ingest tool calls from response_item function call events.",
+    );
 
+    const codexTurnContext = JSON.stringify({
+      timestamp: "2026-02-14T09:09:59.000Z",
+      type: "turn_context",
+      payload: {
+        turn_id: "codex-turn-3",
+        cwd: codexProjectPathLatest,
+      },
+    });
     const partialCodexEntry = JSON.stringify({
-      session_id: "codex-s1",
-      ts: 1771000900,
-      text: "Partial codex entry should be ingested only after line completion",
-      cwd: codexProjectPathLatest,
+      timestamp: "2026-02-14T09:10:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "Partial codex entry should be ingested only after line completion",
+        images: [],
+        local_images: [],
+        text_elements: [],
+      },
+    });
+    const codexTaskComplete = JSON.stringify({
+      timestamp: "2026-02-14T09:10:10.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "codex-turn-3",
+      },
     });
     const splitIndex = Math.floor(partialCodexEntry.length / 2);
-    writeFileSync(codexHistoryPath, partialCodexEntry.slice(0, splitIndex), {
+    writeFileSync(codexRolloutFile, `${codexTurnContext}\n`, {
+      encoding: "utf8",
+      flag: "a",
+    });
+    writeFileSync(codexRolloutFile, partialCodexEntry.slice(0, splitIndex), {
       encoding: "utf8",
       flag: "a",
     });
@@ -337,10 +465,14 @@ async function main(): Promise<void> {
       "Incomplete JSONL line should not advance codex cursor or be ingested.",
     );
 
-    writeFileSync(codexHistoryPath, `${partialCodexEntry.slice(splitIndex)}\n`, {
-      encoding: "utf8",
-      flag: "a",
-    });
+    writeFileSync(
+      codexRolloutFile,
+      `${partialCodexEntry.slice(splitIndex)}\n${codexTaskComplete}\n`,
+      {
+        encoding: "utf8",
+        flag: "a",
+      },
+    );
     run(
       "node",
       [distCli, "sync", "codex", "--data-dir", dataDir],
@@ -350,7 +482,26 @@ async function main(): Promise<void> {
     const codexAfterComplete = countCodexRequestEvents(dbPath);
     assert(
       codexAfterComplete === initialCodexCount + 1,
-      "Completed JSONL line should be ingested exactly once.",
+      "Completed Codex rollout line should be ingested exactly once.",
+    );
+
+    writeFileSync(codexHistoryPath, `${JSON.stringify({
+      session_id: "codex-history-fallback",
+      ts: 1771001200,
+      text: "Fallback history line should not be ingested when rollout files exist",
+      cwd: codexProjectPathLatest,
+    })}\n`, {
+      encoding: "utf8",
+      flag: "a",
+    });
+    run(
+      "node",
+      [distCli, "sync", "codex", "--data-dir", dataDir],
+      { cwd: rootDir },
+    );
+    assert(
+      countCodexRequestEvents(dbPath) === codexAfterComplete,
+      "Codex rollout mode should prefer sessions logs and avoid duplicate history ingestion.",
     );
 
     const claudeSessionId = "claude-e2e-session";
@@ -895,6 +1046,14 @@ async function main(): Promise<void> {
       });
     });
 
+    const dashboardHtmlRes = await fetch(`http://127.0.0.1:${dashboardPort}/`);
+    assert(dashboardHtmlRes.ok, "Dashboard HTML endpoint should return 200.");
+    const dashboardHtml = await dashboardHtmlRes.text();
+    assert(
+      !dashboardHtml.includes('<option value="gemini">gemini</option>'),
+      "Dashboard agent selector should hide Gemini while unsupported.",
+    );
+
     const statsRes = await fetch(
       `http://127.0.0.1:${dashboardPort}/api/stats?range=all`,
     );
@@ -928,6 +1087,66 @@ async function main(): Promise<void> {
       ),
       "Dashboard filtered stats should include codex project rows.",
     );
+
+    const codexLiveSessionRaw = "019c470b-d362-7f73-afcf-94441832c002";
+    const codexLiveRolloutFile = join(
+      codexSessionsPath,
+      "2026",
+      "02",
+      "15",
+      `rollout-2026-02-15T04-00-00-${codexLiveSessionRaw}.jsonl`,
+    );
+    mkdirSync(dirname(codexLiveRolloutFile), { recursive: true });
+    writeFileSync(
+      codexLiveRolloutFile,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-15T04:00:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: codexLiveSessionRaw,
+            cwd: codexProjectPathLatest,
+            model_provider: "openai",
+            source: "vscode",
+            originator: "Codex Desktop",
+            git: {
+              branch: "main",
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-15T04:00:03.000Z",
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Write SQL query for user growth trend by week",
+            images: [],
+            local_images: [],
+            text_elements: [],
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-15T04:00:12.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "codex-live-turn-1",
+          },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    await waitForConditionAsync(async () => {
+      const response = await fetch(
+        `http://127.0.0.1:${dashboardPort}/api/stats?range=all&agent=codex`,
+      );
+      if (!response.ok) {
+        return false;
+      }
+      const payload = (await response.json()) as { summary?: { sessions?: number } };
+      return (payload.summary?.sessions ?? 0) >= 2;
+    }, { timeoutMs: 30_000, intervalMs: 500 });
 
     console.log("E2E success: full workflow validated.");
     console.log(`Workspace: ${workspaceDir}`);

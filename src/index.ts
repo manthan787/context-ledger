@@ -150,6 +150,7 @@ type SyncOutcome = {
   inserted: number;
   skipped: number;
   touchedSessionIds: string[];
+  summarySessionIds: string[];
   reason?: string;
 };
 
@@ -213,6 +214,7 @@ function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
     const result = syncCodexHistory({
       dataDir: explicitDataDir,
       historyPath: config.integrations.codex.historyPath,
+      sessionsPath: config.integrations.codex.sessionsPath,
     });
     outcomes.push({
       provider: "codex",
@@ -220,6 +222,7 @@ function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
       inserted: result.inserted,
       skipped: result.skipped,
       touchedSessionIds: result.touchedSessionIds,
+      summarySessionIds: result.summarySessionIds,
       reason: result.reason,
     });
   }
@@ -235,6 +238,7 @@ function syncEnabledIntegrations(explicitDataDir?: string): SyncOutcome[] {
       inserted: result.inserted,
       skipped: result.skipped,
       touchedSessionIds: result.touchedSessionIds,
+      summarySessionIds: result.touchedSessionIds,
       reason: result.reason,
     });
   }
@@ -264,7 +268,11 @@ function enqueueAutoSummariesFromSync(
   explicitDataDir: string | undefined,
   source: string,
 ): void {
-  const touched = outcomes.flatMap((outcome) => outcome.touchedSessionIds);
+  const touched = outcomes.flatMap((outcome) =>
+    outcome.summarySessionIds.length > 0
+      ? outcome.summarySessionIds
+      : outcome.touchedSessionIds,
+  );
   enqueueAutoSummaries(touched, explicitDataDir, source);
 }
 
@@ -615,6 +623,7 @@ program
   .argument("<agent>", "Agent to enable (claude|codex|gemini)")
   .option("--scope <scope>", "Integration scope (user|project)", "user")
   .option("--history-path <path>", "Custom history path (codex/gemini)")
+  .option("--sessions-path <path>", "Custom sessions root path (codex)")
   .option("--data-dir <path>", "Custom data directory")
   .action(
     (
@@ -622,6 +631,7 @@ program
       options: {
         scope: string;
         historyPath?: string;
+        sessionsPath?: string;
         dataDir?: string;
       },
     ) => {
@@ -662,12 +672,15 @@ program
         const result = enableCodex({
           dataDir: options.dataDir,
           historyPath: options.historyPath,
+          sessionsPath: options.sessionsPath,
         });
         console.log("Codex integration enabled.");
         console.log(`History path: ${result.historyPath}`);
+        console.log(`Sessions path: ${result.sessionsPath}`);
         const sync = syncCodexHistory({
           dataDir: options.dataDir,
           historyPath: result.historyPath,
+          sessionsPath: result.sessionsPath,
         });
         console.log(
           `Initial sync: ${sync.status} (inserted ${sync.inserted}, skipped ${sync.skipped})`,
@@ -712,12 +725,14 @@ program
   .description("Sync enabled external history integrations")
   .argument("[agent]", "Specific integration to sync (codex|gemini|all)", "all")
   .option("--history-path <path>", "Override history path for the specific sync target")
+  .option("--sessions-path <path>", "Override sessions path for codex sync")
   .option("--data-dir <path>", "Custom data directory")
   .action(
     (
       agent: string,
       options: {
         historyPath?: string;
+        sessionsPath?: string;
         dataDir?: string;
       },
     ) => {
@@ -728,6 +743,7 @@ program
         const result = syncCodexHistory({
           dataDir: options.dataDir,
           historyPath: target === "codex" ? options.historyPath : undefined,
+          sessionsPath: target === "codex" ? options.sessionsPath : undefined,
         });
         outcomes.push({
           provider: "codex",
@@ -735,6 +751,7 @@ program
           inserted: result.inserted,
           skipped: result.skipped,
           touchedSessionIds: result.touchedSessionIds,
+          summarySessionIds: result.summarySessionIds,
           reason: result.reason,
         });
       }
@@ -750,6 +767,7 @@ program
           inserted: result.inserted,
           skipped: result.skipped,
           touchedSessionIds: result.touchedSessionIds,
+          summarySessionIds: result.touchedSessionIds,
           reason: result.reason,
         });
       }
@@ -813,7 +831,7 @@ program
     console.log(
       `- codex: ${
         codex
-          ? `${codex.enabled ? "enabled" : "disabled"} (${codex.historyPath})`
+          ? `${codex.enabled ? "enabled" : "disabled"} (history: ${codex.historyPath}, sessions: ${codex.sessionsPath ?? "(default)"})`
           : "not configured"
       }`,
     );
@@ -1449,9 +1467,41 @@ program
       console.log(`ContextLedger dashboard running at http://127.0.0.1:${port}`);
       console.log("Press Ctrl+C to stop.");
 
-      process.on("SIGINT", () => {
+      let syncInFlight = false;
+      const liveSync = (): void => {
+        if (syncInFlight) {
+          return;
+        }
+        syncInFlight = true;
+        try {
+          const liveOutcomes = syncEnabledIntegrations(options.dataDir);
+          enqueueAutoSummariesFromSync(
+            liveOutcomes,
+            options.dataDir,
+            "auto_sync_dashboard_live",
+          );
+        } catch {
+          // Dashboard live sync should never crash the server process.
+        } finally {
+          syncInFlight = false;
+        }
+      };
+
+      const liveSyncInterval = setInterval(liveSync, 2_000);
+      liveSyncInterval.unref();
+
+      let closing = false;
+      const closeServer = (): void => {
+        if (closing) {
+          return;
+        }
+        closing = true;
+        clearInterval(liveSyncInterval);
         server.close(() => process.exit(0));
-      });
+      };
+
+      process.on("SIGINT", closeServer);
+      process.on("SIGTERM", closeServer);
     } catch (error) {
       const code =
         typeof error === "object" &&

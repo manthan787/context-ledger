@@ -1,8 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadAppConfig, saveAppConfig } from "../config";
-import { redactText } from "../privacy/redaction";
+import {
+  buildPromptPayload,
+  extractOptionalString,
+  normalizeTimestamp,
+  readIncrementalJsonLines,
+} from "./shared";
 import { recordEvent } from "../storage/db";
 
 interface GeminiHistoryEntry {
@@ -43,42 +48,6 @@ function getDefaultHistoryPath(): string {
 
 function normalizeHistoryPath(input?: string): string {
   return input && input.trim().length > 0 ? input.trim() : getDefaultHistoryPath();
-}
-
-function extractOptionalString(
-  source: Record<string, unknown>,
-  keys: string[],
-): string | undefined {
-  for (const key of keys) {
-    const value = source[key];
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      if (trimmed.length > 0) {
-        return trimmed;
-      }
-    }
-  }
-  return undefined;
-}
-
-function normalizeTimestamp(raw: unknown): number | null {
-  if (typeof raw === "number" && Number.isFinite(raw)) {
-    return raw > 1000_000_000_000 ? raw : raw * 1000;
-  }
-
-  if (typeof raw === "string" && raw.trim().length > 0) {
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric)) {
-      return numeric > 1000_000_000_000 ? numeric : numeric * 1000;
-    }
-
-    const parsed = Date.parse(raw);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-
-  return null;
 }
 
 function parseGeminiHistoryLine(line: string): GeminiHistoryEntry | null {
@@ -181,19 +150,10 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
     };
   }
 
-  const contentBuffer = readFileSync(historyPath);
-  const currentLength = contentBuffer.length;
-  let cursor = integration?.cursor ?? 0;
-  if (!Number.isFinite(cursor) || cursor < 0 || cursor > currentLength) {
-    cursor = 0;
-  }
-
-  const chunk = contentBuffer.toString("utf8", cursor);
-  const lines = chunk.split(/\r?\n/);
-  let unprocessedTail = "";
-  if (chunk.length > 0 && !chunk.endsWith("\n") && !chunk.endsWith("\r")) {
-    unprocessedTail = lines.pop() ?? "";
-  }
+  const { lines, nextCursor } = readIncrementalJsonLines(
+    historyPath,
+    integration?.cursor ?? 0,
+  );
 
   let inserted = 0;
   let skipped = 0;
@@ -208,15 +168,6 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
       continue;
     }
 
-    const prompt = redactText(entry.prompt, config.privacy);
-    const payload: Record<string, unknown> = {
-      source: "gemini_history_jsonl",
-      promptLength: prompt.length,
-    };
-    if (config.privacy.capturePrompts) {
-      payload.prompt = prompt;
-    }
-
     const sessionId = `gemini-${entry.sessionId}`;
     recordEvent(
       {
@@ -226,7 +177,11 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
         eventType: "request_sent",
         timestamp: new Date(entry.timestampMs).toISOString(),
         repoPath: entry.repoPath,
-        payload,
+        payload: buildPromptPayload(
+          entry.prompt,
+          "gemini_history_jsonl",
+          config.privacy,
+        ),
       },
       options.dataDir,
     );
@@ -234,9 +189,6 @@ export function syncGeminiHistory(options: SyncGeminiOptions): SyncGeminiResult 
     inserted += 1;
   }
 
-  // Keep the trailing partial line for the next sync so we do not drop events
-  // when JSONL writers flush in the middle of a line.
-  const nextCursor = currentLength - Buffer.byteLength(unprocessedTail, "utf8");
   saveAppConfig(
     {
       ...config,

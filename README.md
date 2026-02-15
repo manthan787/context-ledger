@@ -54,10 +54,13 @@ Captured events:
 
 ### Codex
 
-`ctx-ledger enable codex` enables incremental ingestion from Codex history JSONL.
+`ctx-ledger enable codex` enables incremental ingestion from Codex session rollouts.
 
-- Default source: `~/.codex/history.jsonl`
-- Custom source: `ctx-ledger enable codex --history-path /path/to/history.jsonl`
+- Primary source (rich events): `~/.codex/sessions/**/rollout-*.jsonl`
+- Fallback source: `~/.codex/history.jsonl` when rollout files are unavailable
+- Custom sources:
+  - `ctx-ledger enable codex --sessions-path /path/to/.codex/sessions`
+  - `ctx-ledger enable codex --history-path /path/to/history.jsonl`
 
 ### Gemini
 
@@ -72,6 +75,8 @@ Captured events:
 ctx-ledger sync all
 ctx-ledger sync codex
 ctx-ledger sync gemini
+# Optional for codex:
+ctx-ledger sync codex --sessions-path /path/to/.codex/sessions
 ```
 
 `stats`, `summarize`, `resume`, `handoff`, and `dashboard` automatically run sync for enabled Codex/Gemini integrations.
@@ -179,7 +184,8 @@ Intent labels support granular paths. Examples:
 Automatic behavior:
 
 - Claude sessions auto-summarize on `Stop` (turn-level) and `SessionEnd` hook events.
-- Codex/Gemini sessions auto-summarize after sync imports new events.
+- Codex sessions auto-summarize after Codex turn completion (`task_complete`) is imported.
+- Gemini sessions auto-summarize after sync imports new events.
 - `summarize` remains available as a manual/force command.
 
 ## Resume Packs
@@ -225,8 +231,9 @@ Open:
 
 - `http://127.0.0.1:4173/`
 - API: `/api/stats`, `/api/sessions`, `/api/resume-packs`, `/healthz`
-- Optional API filter: `?agent=claude|codex|gemini` on `/api/stats` and `/api/sessions`
+- Optional API filter: `?agent=claude|codex` on `/api/stats` and `/api/sessions`
 - UI includes planning vs execution and project-time breakdowns, plus project path in recent sessions
+- Dashboard auto-refreshes every 3s and keeps syncing enabled integrations in the background
 
 ## End-to-End Tests
 
